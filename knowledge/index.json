@@ -1,0 +1,20 @@
+[
+    {
+        "name": "工作流AGENT",
+        "description": "工作流AGENT页面",
+        "filePath": "./工作流AGENT.json",
+        "parentPage": "AGENT管理"
+    },
+    {
+        "name": "添加助手场景",
+        "description": "工作流AGENT的添加助手场景功能，包含表单结构、操作步骤、测试用例和常见陷阱",
+        "filePath": "./添加助手场景.json",
+        "parentPage": "工作流AGENT"
+    },
+    {
+        "name": "login页面",
+        "description": "登陆页面",
+        "filePath": "./login.json",
+        "parentPage": ""
+    }
+]

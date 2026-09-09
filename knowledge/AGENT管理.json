@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/ai-platform-dashboard-schema.json",
+  "title": "AI智能体开发平台 - 首页数据看板",
+  "description": "描述平台首页的布局结构、指标卡片、图表数据及交互导航规则，用于指导GUI Agent进行UI识别、数据校验和自动化测试。",
+  "type": "object",
+  "properties": {
+    "header": {
+      "type": "object",
+      "description": "顶部导航栏区域",
+      "properties": {
+        "pageTabs": { "type": "array", "items": { "type": "string" }, "description": "当前打开的工作区标签，如：首页" },
+        "searchBox": { "type": "string", "description": "全局搜索输入框，placeholder为'搜索'" },
+        "headerIcons": { "type": "array", "items": { "type": "string", "enum": ["应用列表", "通知", "帮助", "用户头像"] } }
+      }
+    },
+    "sidebar": {
+      "type": "object",
+      "description": "左侧主导航菜单",
+      "properties": {
+        "menus": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["渠道管理", "系统配置", "AGENT管理", "组件库", "资源库", "监控运维", "系统维护", "个人中心"] }
+        },
+        "expandedSubMenus": {
+          "type": "array",
+          "description": "AGENT管理展开后的子菜单",
+          "items": { "type": "string", "enum": ["工作流AGENT", "自主规划AGENT", "AGENT模板"] }
+        }
+      }
+    },
+    "dashboardContent": {
+      "type": "object",
+      "description": "主内容区域",
+      "properties": {
+        "metricCards": {
+          "type": "array",
+          "description": "顶部三个核心指标卡片",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cardTitle": { "type": "string", "enum": ["渠道应用总数", "引擎服务总数", "场景总数"] },
+              "cardValue": { "type": "integer", "description": "动态数据，当前截图分别为24, 119, 771" },
+              "iconType": { "type": "string", "enum": ["链接", "机器人", "立方体"] }
+            }
+          }
+        },
+        "charts": {
+          "type": "object",
+          "description": "图表数据区域",
+          "properties": {
+            "capabilityProportion": {
+              "type": "object",
+              "description": "各能力占比（环形图及明细）",
+              "properties": {
+                "chartType": { "type": "string", "enum": ["环形图"] },
+                "legend": { "type": "array", "items": { "type": "string", "enum": ["助手配置", "知识管理", "自由应答", "知识检索", "文本结构化增强", "知识库问答"] } },
+                "dataItems": {
+                  "type": "array",
+                  "description": "各能力百分比数值列表",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "label": { "type": "string" },
+                      "value": { "type": "string", "description": "百分比字符串，如 '43.59%'" }
+                    }
+                  }
+                }
+              }
+            },
+            "capabilityTrend": {
+              "type": "object",
+              "description": "能力调用趋势（折线图）",
+              "properties": {
+                "headerMetrics": {
+                  "type": "object",
+                  "properties": {
+                    "todayCalls": { "type": "integer", "description": "今日调用量，当前为1" },
+                    "chainRatio": { "type": "string", "description": "环比，当前为 -82.35%" },
+                    "avgResponseTime": { "type": "string", "description": "平均响应时间，当前为 1.11 s" }
+                  }
+                },
+                "chartType": { "type": "string", "enum": ["折线图"] },
+                "axisLabels": { "type": "object", "description": "X轴为日期，Y轴为调用量", "properties": { "xAxis": { "type": "string", "description": "如 2026-08-26" }, "yAxis": { "type": "string" } } },
+                "legend": { "type": "array", "items": { "type": "string", "enum": ["知识管理"] } }
+              }
+            },
+            "modelComparison": {
+              "type": "object",
+              "description": "模型调用对比（双折线图）",
+              "properties": {
+                "chartType": { "type": "string", "enum": ["双折线图"] },
+                "legend": { "type": "array", "items": { "type": "string", "enum": ["Qwen1.5-32B", "qwen1.5-本地-chat"] } },
+                "xAxisDateRange": { "type": "string", "description": "当前为 2026-09-02 至 2026-09-08" }
+              }
+            },
+            "sceneOperationDistribution": {
+              "type": "object",
+              "description": "场景操作分布（条形图）",
+              "properties": {
+                "chartType": { "type": "string", "enum": ["条形图"] },
+                "summaryMetrics": {
+                  "type": "object",
+                  "properties": {
+                    "totalCalls": { "type": "integer", "description": "调用总量，当前为 7,780" },
+                    "errorRate": { "type": "number", "description": "错误率，当前为 0.16" }
+                  }
+                },
+                "operations": {
+                  "type": "array",
+                  "description": "场景操作项目",
+                  "items": { "type": "string", "enum": ["知识检索", "自由应答", "文本结构化增强", "SQL生成", "知识管理", "助手配置"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["header", "sidebar", "dashboardContent"],
+  "interactionRules": {
+    "clickSidebar": "点击导航栏的任意主菜单或子菜单，页面应跳转至对应模块（如点击'工作流AGENT'跳转到场景列表页）。",
+    "search": "在顶部搜索框输入关键词并回车，应触发全局搜索功能并展示结果。",
+    "hoverCharts": "鼠标悬停在图表数据点或柱状图/饼图上时，系统应显示具体的Tooltip提示数据详情（如具体数值、百分比等）。",
+    "dataRefresh": "顶部的指标卡片数据（渠道应用总数、引擎服务总数、场景总数）以及各个图表中的具体数值，均由后台API实时获取动态渲染，刷新页面后数值可能发生变更。"
+  }
+}

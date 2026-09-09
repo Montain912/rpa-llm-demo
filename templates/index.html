@@ -1,0 +1,974 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RPA + LLM 智能体 Demo</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: #f5f7fa;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* 顶部导航 */
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .header .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #52c41a;
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.running { background: #faad14; }
+        .status-dot.error { background: #ff4d4f; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* 主内容区 */
+        .main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* 左侧桌面区域 */
+        .desktop-panel {
+            flex: 1;
+            background: #1a1a2e;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .desktop-header {
+            padding: 8px 16px;
+            background: #16213e;
+            color: #e0e0e0;
+            font-size: 13px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .desktop-header button {
+            background: #0f3460;
+            color: white;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .desktop-header button:hover { background: #1a4a7a; }
+
+        .desktop-view {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: auto;
+            padding: 8px;
+            position: relative;
+            background: #1a1a2e;
+        }
+
+        .desktop-view img {
+            max-width: 100%;
+            max-height: 100%;
+            border-radius: 6px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+
+        /* noVNC 容器 div：填满容器；RFB 会在内部创建自己的 canvas */
+        #vncCanvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            border-radius: 6px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            cursor: default;
+            object-fit: contain;
+        }
+
+        .desktop-placeholder {
+            color: #666;
+            text-align: center;
+        }
+
+        /* 右侧聊天面板 */
+        .chat-panel {
+            width: 420px;
+            background: white;
+            display: flex;
+            flex-direction: column;
+            border-left: 1px solid #e8e8e8;
+            box-shadow: -2px 0 8px rgba(0,0,0,0.05);
+        }
+
+        .chat-header {
+            padding: 16px;
+            border-bottom: 1px solid #f0f0f0;
+            font-weight: 600;
+            font-size: 15px;
+            color: #333;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .message {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: #667eea;
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.agent {
+            align-self: flex-start;
+            background: #f5f5f5;
+            color: #333;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.system {
+            align-self: center;
+            background: #fff7e6;
+            color: #d48806;
+            font-size: 12px;
+            padding: 6px 12px;
+        }
+
+        .step-info {
+            font-size: 12px;
+            color: #888;
+            margin-top: 4px;
+        }
+
+        .step-action {
+            display: inline-block;
+            background: #e6f7ff;
+            color: #1890ff;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            margin-top: 6px;
+        }
+
+        /* 输入区域 */
+        .chat-input-area {
+            padding: 16px;
+            border-top: 1px solid #f0f0f0;
+            background: #fafafa;
+        }
+
+        .input-wrapper {
+            display: flex;
+            gap: 8px;
+        }
+
+        .input-wrapper textarea {
+            flex: 1;
+            padding: 10px 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 8px;
+            resize: none;
+            font-size: 14px;
+            font-family: inherit;
+            min-height: 44px;
+            max-height: 120px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .input-wrapper textarea:focus {
+            border-color: #667eea;
+        }
+
+        .input-wrapper button {
+            padding: 0 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: opacity 0.2s;
+        }
+
+        .input-wrapper button:hover { opacity: 0.9; }
+        .input-wrapper button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* 暂停/终止控制按钮 */
+        .control-buttons {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 10px;
+        }
+
+        .control-buttons button {
+            flex: 1;
+            padding: 8px 0;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: opacity 0.2s;
+        }
+
+        .control-buttons button:hover { opacity: 0.9; }
+        .control-buttons button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .btn-pause {
+            background: #faad14;
+            color: white;
+        }
+
+        .btn-stop {
+            background: #ff4d4f;
+            color: white;
+        }
+
+        /* 设置面板 */
+        .settings-btn {
+            background: transparent;
+            border: none;
+            color: white;
+            cursor: pointer;
+            font-size: 16px;
+            padding: 4px 8px;
+        }
+
+        .settings-modal {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .settings-modal.show { display: flex; }
+
+        .settings-content {
+            background: white;
+            padding: 24px;
+            border-radius: 12px;
+            width: 400px;
+            max-width: 90%;
+        }
+
+        .settings-content h3 {
+            margin-bottom: 16px;
+            color: #333;
+        }
+
+        .form-group {
+            margin-bottom: 14px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 13px;
+            color: #555;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .settings-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 20px;
+        }
+
+        .settings-actions button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            border: none;
+        }
+
+        .btn-cancel {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        /* 示例命令 */
+        .example-tasks {
+            padding: 0 16px 12px;
+            font-size: 12px;
+            color: #999;
+        }
+
+        .example-tasks .example {
+            display: inline-block;
+            background: #f0f5ff;
+            color: #667eea;
+            padding: 4px 10px;
+            border-radius: 12px;
+            margin: 3px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .example-tasks .example:hover { background: #d6e4ff; }
+
+        /* 滚动条 */
+        .chat-messages::-webkit-scrollbar { width: 6px; }
+        .chat-messages::-webkit-scrollbar-track { background: transparent; }
+        .chat-messages::-webkit-scrollbar-thumb {
+            background: #ddd;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <!-- 顶部 -->
+    <div class="header">
+        <h1>🤖 RPA + LLM 智能体自动化平台</h1>
+        <div class="status">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">就绪</span>
+            <button class="settings-btn" onclick="toggleSettings()" title="设置">⚙️</button>
+        </div>
+    </div>
+
+    <!-- 主内容 -->
+    <div class="main">
+        <!-- 左侧桌面视图 -->
+        <div class="desktop-panel">
+            <div class="desktop-header">
+                <span id="desktopTitle">远程桌面（VNC）</span>
+                <button id="vncToggleBtn" onclick="toggleVNC()">🔗 连接桌面</button>
+            </div>
+            <div class="desktop-view" id="desktopView">
+                <div id="vncCanvas" style="display:none;"></div>
+                <div id="vncPlaceholder" class="desktop-placeholder">
+                    <p>🖥️ 点击"连接桌面"开始远程操作</p>
+                    <p style="font-size: 12px; margin-top: 8px;">将启动 websockify 代理，浏览器经 WebSocket 直连 VNC Server</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- 右侧聊天面板 -->
+        <div class="chat-panel">
+            <div class="chat-header">💬 任务指令</div>
+            <div class="chat-messages" id="chatMessages">
+                <div class="message system">
+                    你好！我是 RPA 智能体。请输入你想要执行的任务，我会通过观察屏幕并操作鼠标键盘来完成任务。
+                </div>
+            </div>
+
+            <div class="example-tasks">
+                <span>试试：</span>
+                <span class="example" onclick="useExample('打开终端')">打开终端</span>
+                <span class="example" onclick="useExample('打开浏览器并访问百度')">打开浏览器</span>
+                <span class="example" onclick="useExample('在桌面创建一个文本文件')">创建文件</span>
+            </div>
+
+            <div class="chat-input-area">
+                <div class="control-buttons" id="controlButtons" style="display: none;">
+                    <button id="pauseBtn" class="btn-pause" onclick="togglePause()">⏸ 暂停</button>
+                    <button id="stopBtn" class="btn-stop" onclick="stopTask()">⏹ 终止</button>
+                </div>
+                <div class="input-wrapper">
+                    <textarea
+                        id="taskInput"
+                        placeholder="输入任务指令，例如：打开终端..."
+                        rows="1"
+                        onkeydown="handleKeyDown(event)"
+                    ></textarea>
+                    <button id="sendBtn" onclick="sendTask()">发送</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置弹窗 -->
+    <div class="settings-modal" id="settingsModal">
+        <div class="settings-content">
+            <h3>VNC 连接设置</h3>
+            <div class="form-group">
+                <label>主机地址</label>
+                <input type="text" id="vncHost" value="localhost">
+            </div>
+            <div class="form-group">
+                <label>端口</label>
+                <input type="number" id="vncPort" value="5901">
+            </div>
+            <div class="form-group">
+                <label>密码</label>
+                <input type="password" id="vncPassword" value="123456">
+            </div>
+            <div class="settings-actions">
+                <button class="btn-cancel" onclick="toggleSettings()">取消</button>
+                <button class="btn-primary" onclick="saveSettings()">保存并测试</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isRunning = false;
+        let statusWS = null;
+        let wsReconnectTimer = null;
+        let lastStep = 0;
+
+        // noVNC 相关状态
+        let rfb = null;                  // RFB 实例
+        let RFBConstructor = null;       // RFB 类（动态 import 后填充）
+        let novncPort = 6080;             // websockify 代理端口（与后端 WS_PORT 一致）
+        let vncUser = '';                // VNC 用户名（从 /api/novnc-info 获取）
+        let vncPassword = '';            // 用户在设置面板填写的密码
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSettings();
+            loadNovncInfo();
+            connectStatusWS();
+        });
+
+        // WebSocket 状态推送（替代轮询）
+        function connectStatusWS() {
+            if (statusWS) {
+                statusWS.onclose = null;
+                statusWS.close();
+            }
+            const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+            statusWS = new WebSocket(proto + location.host + '/ws/status');
+
+            statusWS.onopen = () => {
+                if (wsReconnectTimer) {
+                    clearInterval(wsReconnectTimer);
+                    wsReconnectTimer = null;
+                }
+                // 保活，防止代理断开空闲连接
+                statusWS._pingTimer = setInterval(() => {
+                    if (statusWS.readyState === WebSocket.OPEN) statusWS.send('ping');
+                }, 15000);
+            };
+
+            statusWS.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleStatusData(data);
+            };
+
+            statusWS.onclose = () => {
+                // 断线自动重连
+                if (!wsReconnectTimer) {
+                    wsReconnectTimer = setInterval(connectStatusWS, 3000);
+                }
+            };
+
+            statusWS.onerror = () => statusWS.close();
+        }
+
+        // 统一处理状态数据（WS 推送与快照共用）
+        function handleStatusData(data) {
+            // 快照：页面刷新/重连后全量重建历史消息
+            if (data.type === 'snapshot') {
+                rebuildFromSnapshot(data);
+                return;
+            }
+            if (data.type === 'task_started') {
+                lastStep = 0;
+                setRunning(true);
+                return;
+            }
+            if (data.type === 'paused') {
+                syncPauseUI(data.paused);
+                return;
+            }
+            if (data.type === 'result') {
+                setRunning(false);
+                if (data.result) addMessage('system', '📋 ' + data.result);
+                return;
+            }
+            if (data.type === 'step') {
+                appendStep(data);
+            }
+        }
+
+        // 快照重建：清空后按顺序重放历史步骤
+        function rebuildFromSnapshot(data) {
+            const container = document.getElementById('chatMessages');
+            // 仅保留初始欢迎语（第一条 system 消息）
+            const first = container.firstElementChild;
+            container.innerHTML = '';
+            if (first && first.classList.contains('system')) container.appendChild(first);
+
+            if (data.task) {
+                addMessage('user', data.task);
+            }
+            lastStep = 0;
+            setRunning(data.running);
+            if (data.running) syncPauseUI(data.paused);
+            if (data.history) data.history.forEach(appendStep);
+            if (!data.running && data.result) {
+                addMessage('system', '📋 ' + data.result);
+            }
+        }
+
+        // 追加一条步骤消息；noVNC 已连接则不刷新 JPEG（实时画面已覆盖）
+        function appendStep(step) {
+            if (step.step <= lastStep) return;
+            const actionText = formatAction(step.action, step.params);
+            addMessage('agent',
+                `<div>步骤 ${step.step}: ${step.thought}</div>
+                 <div class="step-action">${actionText}</div>`,
+                step
+            );
+            lastStep = step.step;
+            if (!rfb) refreshScreenshot();
+        }
+
+        // 同步暂停状态到 UI
+        function syncPauseUI(paused) {
+            const pauseBtn = document.getElementById('pauseBtn');
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            if (paused) {
+                pauseBtn.textContent = '▶ 继续';
+                pauseBtn.disabled = false;
+                dot.className = 'status-dot running';
+                text.textContent = '已暂停';
+            } else {
+                pauseBtn.disabled = false;
+                pauseBtn.textContent = '⏸ 暂停';
+                if (isRunning) {
+                    dot.className = 'status-dot running';
+                    text.textContent = '任务执行中';
+                }
+            }
+        }
+
+        // 发送任务
+        function sendTask() {
+            const input = document.getElementById('taskInput');
+            const task = input.value.trim();
+
+            if (!task || isRunning) return;
+
+            // 添加用户消息
+            addMessage('user', task);
+            input.value = '';
+
+            // 禁用输入
+            setRunning(true);
+
+            // 调用 API 启动任务
+            fetch('/api/task', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ task: task })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    addMessage('system', '🚀 任务已启动，正在执行...');
+                } else {
+                    addMessage('system', '❌ 启动失败: ' + data.error);
+                    setRunning(false);
+                }
+            })
+            .catch(err => {
+                addMessage('system', '❌ 网络错误: ' + err.message);
+                setRunning(false);
+            });
+        }
+
+        // 格式化动作显示
+        function formatAction(action, params) {
+            switch(action) {
+                case 'click':
+                    return `click(${params.x}, ${params.y})`;
+                case 'double_click':
+                    return `double_click(${params.x}, ${params.y})`;
+                case 'right_click':
+                    return `right_click(${params.x}, ${params.y})`;
+                case 'type':
+                    return `type("${params.text?.substring(0, 30) || ''}${params.text?.length > 30 ? '...' : ''}")`;
+                case 'press':
+                    return `press(${params.key})`;
+                case 'scroll':
+                    return `scroll(${params.direction})`;
+                case 'wait':
+                    return 'wait()';
+                case 'done':
+                    return 'done() ✅';
+                default:
+                    return `${action}(...)`;
+            }
+        }
+
+        // 添加消息
+        function addMessage(type, content, meta) {
+            const container = document.getElementById('chatMessages');
+            const div = document.createElement('div');
+            div.className = `message ${type}`;
+            div.innerHTML = content;
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // 设置运行状态
+        function setRunning(running) {
+            isRunning = running;
+            const btn = document.getElementById('sendBtn');
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            const input = document.getElementById('taskInput');
+            const controlButtons = document.getElementById('controlButtons');
+            const stopBtn = document.getElementById('stopBtn');
+
+            btn.disabled = running;
+            btn.textContent = running ? '执行中...' : '发送';
+            input.disabled = running;
+
+            // 控制按钮仅任务运行时可见；终止后立即禁用防止重复点击
+            controlButtons.style.display = running ? 'flex' : 'none';
+            stopBtn.disabled = false;
+            if (!running) {
+                document.getElementById('pauseBtn').textContent = '⏸ 暂停';
+                document.getElementById('pauseBtn').disabled = false;
+            }
+
+            if (running) {
+                dot.className = 'status-dot running';
+                text.textContent = '任务执行中';
+            } else {
+                dot.className = 'status-dot';
+                text.textContent = '就绪';
+            }
+        }
+
+        // 暂停/恢复任务
+        function togglePause() {
+            const pauseBtn = document.getElementById('pauseBtn');
+            const pausing = pauseBtn.textContent.includes('暂停');
+            pauseBtn.disabled = true;
+
+            fetch('/api/pause', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pause: pausing })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    pauseBtn.textContent = pausing ? '▶ 继续' : '⏸ 暂停';
+                    addMessage('system', pausing ? '⏸ 任务已暂停' : '▶ 任务已恢复');
+                } else {
+                    addMessage('system', '❌ ' + data.error);
+                }
+                pauseBtn.disabled = false;
+            })
+            .catch(err => {
+                addMessage('system', '❌ 网络错误: ' + err.message);
+                pauseBtn.disabled = false;
+            });
+        }
+
+        // 终止任务
+        function stopTask() {
+            const stopBtn = document.getElementById('stopBtn');
+            const pauseBtn = document.getElementById('pauseBtn');
+            stopBtn.disabled = true;
+            pauseBtn.disabled = true;
+
+            fetch('/api/stop', { method: 'POST' })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    addMessage('system', '⏹ 终止信号已发送，当前步骤完成后停止...');
+                } else {
+                    addMessage('system', '❌ ' + data.error);
+                    stopBtn.disabled = false;
+                    pauseBtn.disabled = false;
+                }
+            })
+            .catch(err => {
+                addMessage('system', '❌ 网络错误: ' + err.message);
+                stopBtn.disabled = false;
+                pauseBtn.disabled = false;
+            });
+        }
+
+        // 刷新截图
+        function refreshScreenshot() {
+            fetch('/api/screenshot')
+                .then(res => res.json())
+                .then(data => {
+                    const view = document.getElementById('desktopView');
+                    if (data.success) {
+                        view.innerHTML = `<img src="${data.screenshot}" alt="远程桌面">`;
+                    } else {
+                        view.innerHTML = `<div class="desktop-placeholder" style="color: #ff6b6b;">
+                            <p>❌ 获取截图失败</p>
+                            <p style="font-size: 12px; margin-top: 8px;">${data.error}</p>
+                        </div>`;
+                    }
+                })
+                .catch(err => {
+                    document.getElementById('desktopView').innerHTML = 
+                        `<div class="desktop-placeholder" style="color: #ff6b6b;">
+                            <p>❌ 网络错误</p>
+                            <p style="font-size: 12px; margin-top: 8px;">${err.message}</p>
+                        </div>`;
+                });
+        }
+
+        // 设置弹窗
+        function toggleSettings() {
+            const modal = document.getElementById('settingsModal');
+            modal.classList.toggle('show');
+        }
+
+        function loadSettings() {
+            fetch('/api/vnc-config')
+                .then(res => res.json())
+                .then(data => {
+                    document.getElementById('vncHost').value = data.host || 'localhost';
+                    document.getElementById('vncPort').value = data.port || 5901;
+                });
+        }
+
+        function saveSettings() {
+            const host = document.getElementById('vncHost').value;
+            const port = document.getElementById('vncPort').value;
+            const password = document.getElementById('vncPassword').value;
+
+            fetch('/api/test-connection', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ host, port, password })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    // 连接成功，保存配置；后端会自动重启 websockify 代理
+                    fetch('/api/vnc-config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ host, port, password })
+                    }).then(() => {
+                        vncPassword = password;
+                        // 若 noVNC 已连接，配置变更后需断开重连
+                        if (rfb) {
+                            disconnectVNC();
+                            addMessage('system', '⚠️ VNC 配置已变更，请重新连接桌面');
+                        }
+                        // 重新拉取端口信息（可能未来支持动态端口）
+                        loadNovncInfo();
+                    });
+                    alert('✅ 连接成功！分辨率: ' + data.resolution);
+                    toggleSettings();
+                    if (!rfb) refreshScreenshot();
+                } else {
+                    alert('❌ 连接失败: ' + data.error);
+                }
+            })
+            .catch(err => {
+                alert('❌ 错误: ' + err.message);
+            });
+        }
+
+        // 快捷键：Enter 发送，Shift+Enter 换行
+        function handleKeyDown(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendTask();
+            }
+        }
+
+        // 示例任务
+        function useExample(text) {
+            document.getElementById('taskInput').value = text;
+            document.getElementById('taskInput').focus();
+        }
+
+        // 点击弹窗外部关闭
+        document.getElementById('settingsModal').addEventListener('click', (e) => {
+            if (e.target.id === 'settingsModal') {
+                toggleSettings();
+            }
+        });
+
+        // ====== noVNC 远程桌面集成 ======
+
+        // 拉取 websockify 代理端口与 VNC 用户名
+        function loadNovncInfo() {
+            fetch('/api/novnc-info')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.ws_port) novncPort = data.ws_port;
+                    if (data.vnc_user !== undefined) vncUser = data.vnc_user;
+                    if (data.vnc_password) vncPassword = data.vnc_password;
+                })
+                .catch(() => {});
+        }
+
+        // 动态加载 noVNC RFB 模块（ES module，缓存避免重复加载）
+        async function loadRFB() {
+            if (RFBConstructor) return RFBConstructor;
+            try {
+                const mod = await import('/static/novnc/core/rfb.js');
+                RFBConstructor = mod.default;
+                return RFBConstructor;
+            } catch (e) {
+                addMessage('system', '❌ noVNC 资源加载失败: ' + e.message);
+                throw e;
+            }
+        }
+
+        // 切换 noVNC 连接
+        async function toggleVNC() {
+            const btn = document.getElementById('vncToggleBtn');
+            btn.disabled = true;
+            try {
+                if (rfb) {
+                    disconnectVNC();
+                } else {
+                    await connectVNC();
+                }
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // 连接远程桌面
+        async function connectVNC() {
+            const RFB = await loadRFB();
+            const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+            const wsUrl = `${wsProto}://${location.hostname}:${novncPort}`;
+            const canvas = document.getElementById('vncCanvas');
+
+            try {
+                // TightVNC 只支持密码认证（RFB sec type 2），不支持用户名
+                // 即使后端 VNC_CONFIG 有 user 字段也不传给 noVNC，否则握手失败
+                let creds = null;
+                if (vncPassword) creds = { password: vncPassword };
+                rfb = new RFB(canvas, wsUrl, { credentials: creds || undefined });
+            } catch (e) {
+                addMessage('system', '❌ VNC 连接失败: ' + e.message);
+                rfb = null;
+                return;
+            }
+
+            // 自适应容器尺寸（保持等比缩放）
+            rfb.scaleViewport = true;
+            rfb.resizeSession = false;
+
+            rfb.addEventListener('connect', () => {
+                canvas.style.display = 'block';
+                document.getElementById('vncPlaceholder').style.display = 'none';
+                document.getElementById('vncToggleBtn').textContent = '🔌 断开桌面';
+                addMessage('system', '🔗 远程桌面已连接，可直接在画面上操作');
+            });
+
+            rfb.addEventListener('disconnect', (e) => {
+                const clean = e.detail && e.detail.clean;
+                rfb = null;
+                canvas.style.display = 'none';
+                document.getElementById('vncPlaceholder').style.display = 'block';
+                document.getElementById('vncToggleBtn').textContent = '🔗 连接桌面';
+                if (!clean) {
+                    addMessage('system', '⚠️ VNC 连接断开，可重新点击连接');
+                }
+            });
+
+            // 凭据请求（TightVNC 只支持密码认证）
+            rfb.addEventListener('credentialsrequired', (e) => {
+                let password = vncPassword || prompt('VNC 密码:');
+                if (password) {
+                    rfb.sendCredentials({ password: password });
+                    vncPassword = password;
+                } else {
+                    disconnectVNC();
+                }
+            });
+
+            // 安全握手失败提示
+            rfb.addEventListener('securityfailure', (e) => {
+                const msg = (e.detail && e.detail.reason) || '未知原因';
+                addMessage('system', '❌ VNC 认证失败: ' + msg);
+            });
+        }
+
+        // 断开远程桌面
+        function disconnectVNC() {
+            if (rfb) {
+                const r = rfb;
+                rfb = null;
+                try { r.disconnect(); } catch (e) {}
+            }
+            document.getElementById('vncCanvas').style.display = 'none';
+            document.getElementById('vncPlaceholder').style.display = 'block';
+            document.getElementById('vncToggleBtn').textContent = '🔗 连接桌面';
+        }
+    </script>
+</body>
+</html>

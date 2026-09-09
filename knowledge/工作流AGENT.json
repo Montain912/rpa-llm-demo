@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/ai-workflow-agent-ui-schema.json",
+  "title": "AI智能体开发平台 - 工作流AGENT管理界面",
+  "description": "描述工作流AGENT管理模块的UI结构、表单元素、交互控件及校验规则，用于指导GUI Agent进行页面测试和自动化操作。",
+  "type": "object",
+  "properties": {
+    "sidebarNavigation": {
+      "type": "object",
+      "description": "左侧导航栏",
+      "properties": {
+        "menus": {
+          "type": "array",
+          "description": "一级和二级菜单结构",
+          "items": { "type": "string", "enum": ["渠道管理", "系统配置", "AGENT管理", "组件库", "资源库", "监控运维", "系统维护", "个人中心"] }
+        },
+        "subMenus": {
+          "type": "array",
+          "description": "AGENT管理下的子菜单",
+          "items": { "type": "string", "enum": ["工作流AGENT", "自主规划AGENT", "AGENT模板"] }
+        }
+      }
+    },
+    "mainListPage": {
+      "type": "object",
+      "description": "主场景列表页面的结构",
+      "properties": {
+        "searchFilters": {
+          "type": "object",
+          "description": "顶部搜索条件区域，每个字段都有对应的输入框或下拉选择器",
+          "properties": {
+            "sceneName": { "type": "string", "description": "场景名称输入框" },
+            "serviceStatus": { "type": "string", "enum": ["", "启用", "停用"], "description": "服务状态下拉框" },
+            "sceneChannel": { "type": "string", "description": "场景渠道下拉框" },
+            "publishStatus": { "type": "string", "enum": ["", "已发布", "未发布"], "description": "发布状态下拉框" }
+          }
+        },
+        "table": {
+          "type": "array",
+          "description": "场景数据列表",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sceneId": { "type": "string", "description": "场景ID（系统生成，只读）" },
+              "sceneName": { "type": "string", "description": "场景名称" },
+              "sceneDescription": { "type": "string", "description": "场景描述" },
+              "channelName": { "type": "string", "enum": ["多模态渠道", "广州营销", "云南大数据", "AI服务渠道", "网公司模型理工工具", "贵州智能营销", "深圳电网管家"] },
+              "serviceStatus": { "type": "boolean", "description": "服务状态（Toggle开关，可点击切换）" },
+              "publishStatus": { "type": "boolean", "description": "发布状态（Toggle开关，可点击切换）" },
+              "operationTime": { "type": "string", "format": "date-time", "description": "操作时间" },
+              "actions": { 
+                "type": "array", 
+                "description": "操作列按钮",
+                "items": { "type": "string", "enum": ["删除", "编辑", "画布", "发布"] }
+              }
+            }
+          }
+        },
+        "bottomActions": {
+          "type": "object",
+          "description": "底部操作栏",
+          "properties": {
+            "exportData": { "type": "boolean", "description": "导出数据按钮" },
+            "addScenario": { "type": "boolean", "description": "添加助手场景按钮" }
+          }
+        }
+      }
+    },
+    "configDrawer": {
+      "type": "object",
+      "description": "点击添加或编辑按钮后弹出的右侧配置抽屉",
+      "properties": {
+        "id": { "type": "string", "readOnly": true, "description": "场景ID，系统生成，不可编辑" },
+        "name": { "type": "string", "maxLength": 100, "description": "场景名称，必填" },
+        "description": { "type": "string", "description": "场景描述" },
+        "greetingText": { "type": "string", "description": "问候语，例如：你好，我是AI小助手小博！" },
+        "closingText": { "type": "string", "description": "结束语" },
+        "promptText": { "type": "string", "description": "引导语" },
+        "sceneChannel": { 
+          "type": "string", 
+          "description": "场景渠道（必填项，若未填写点击保存会提示“场景渠道必填”并标红）",
+          "enum": ["多模态渠道", "广州营销", "云南大数据", "AI服务渠道", "网公司模型理工工具", "贵州智能营销", "深圳电网管家"] 
+        },
+        "assistantType": {
+          "type": "string",
+          "description": "助手类型（必填项）",
+          "enum": ["纯文本", "TTS", "虚拟人"]
+        },
+        "titleModel": {
+          "type": "string",
+          "description": "标题模型（必填项，若未选择会提示“标题模型必填”并标红，通常关联已接入的大模型列表）",
+          "enum": ["qwen3-32B", "稽查大瓦特","qwen3本地chat","深圳大瓦特qwen3","蒙西灵犀使能平台"]
+        },
+        "enableSmartRecommendation": { "type": "boolean", "description": "是否启用智能推荐（Toggle开关）" },
+        "memoryVariables": {
+          "type": "array",
+          "description": "记忆变量列表",
+          "items": {
+            "type": "object",
+            "properties": {
+              "variableName": { "type": "string", "description": "名称" },
+              "description": { "type": "string", "description": "描述" },
+              "defaultValue": { "type": "string", "description": "默认值" },
+              "memoryDuration": { "type": "string", "description": "用户数据记忆时长" }
+            }
+          }
+        }
+      },
+      "required": ["name", "sceneChannel", "assistantType", "titleModel"],
+      "errorMessages": {
+        "sceneChannel": "场景渠道必填",
+        "assistantType": "助手类型必填",
+        "titleModel": "标题模型必填"
+      }
+    },
+    "workflowCanvas": {
+      "type": "object",
+      "description": "点击画布按钮进入的可视化流程图编辑页面",
+      "properties": {
+        "nodeLibrary": {
+          "type": "object",
+          "description": "左侧节点库分类",
+          "properties": {
+            "logicProcessing": { "type": "array", "items": { "type": "string", "enum": ["意图分支", "逻辑分支", "循环处理", "代码处理", "记忆变量"] } },
+            "agentInvocation": { "type": "array", "items": { "type": "string", "enum": ["大模型", "多模态大模型", "Agent"] } },
+            "pluginsTools": { "type": "array", "items": { "type": "string", "enum": ["能力插件", "API请求", "MCP服务", "文件挂载", "图表生成节点"] } },
+            "knowledgeData": { "type": "array", "items": { "type": "string", "enum": ["知识检索", "SQL执行"] } },
+            "inputOutput": { "type": "array", "items": { "type": "string", "enum": ["信息收集", "消息处理"] } }
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "description": "画布中的节点，如开始节点、消息处理节点、结束节点",
+          "items": {
+            "type": "object",
+            "properties": {
+              "nodeType": { "type": "string", "enum": ["开始节点", "结束节点", "消息处理", "大模型", "其他节点"] },
+              "nodeConfig": {
+                 "type": "object",
+                 "description": "节点配置信息（如消息处理节点的输入变量、模板和输出变量）"
+              }
+            }
+          }
+        },
+        "edges": { "type": "array", "description": "节点之间的连线关系" },
+        "bottomToolbar": {
+          "type": "object",
+          "properties": {
+            "save": { "type": "boolean", "description": "保存按钮" },
+            "versionManagement": { "type": "boolean", "description": "版本管理按钮" },
+            "debug": { "type": "boolean", "description": "调试按钮" }
+          }
+        }
+      }
+    }
+  }
+}
