@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/inner-mongolia-power-login-schema.json",
+  "title": "内蒙古电力集团登录页面",
+  "description": "描述系统的用户登录页面的UI结构、输入框属性、按钮交互及前端校验规则，用于指导GUI Agent进行UI识别和自动化测试。",
+  "type": "object",
+  "properties": {
+    "header": {
+      "type": "object",
+      "description": "页面左上角Logo区域",
+      "properties": {
+        "logo": { "type": "string", "description": "内蒙古电力(集团)有限责任公司 Logo 图片" },
+        "companyName": { "type": "string", "description": "公司名称文本" }
+      }
+    },
+    "leftIllustration": {
+      "type": "object",
+      "description": "左侧带有电脑、人物和数据图表的绿色背景插画区（纯展示，无交互功能）"
+    },
+    "loginCard": {
+      "type": "object",
+      "description": "右侧白色登录卡片，包含完整的表单交互。",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "卡片标题",
+          "default": "用户登录"
+        },
+        "usernameInput": {
+          "type": "object",
+          "description": "账号输入框",
+          "properties": {
+            "placeholder": { "type": "string", "default": "请输入登录账号！" },
+            "type": { "type": "string", "enum": ["text", "number"], "default": "text" }
+          }
+        },
+        "passwordInput": {
+          "type": "object",
+          "description": "密码输入框及可见性切换按钮",
+          "properties": {
+            "placeholder": { "type": "string", "default": "请输入登录密码！" },
+            "type": { "type": "string", "enum": ["password", "text"], "default": "password", "description": "默认隐藏密码" },
+            "rightIcon": {
+              "type": "string",
+              "enum": ["eyeOpen", "eyeClose", "dropdown"],
+              "description": "右侧带有下拉箭头/眼睛图标，用于切换密码可见性。"
+            }
+          }
+        },
+        "loginButton": {
+          "type": "object",
+          "description": "登录按钮",
+          "properties": {
+            "text": { "type": "string", "default": "登录" },
+            "type": { "type": "string", "enum": ["submit", "button"], "default": "submit" }
+          }
+        }
+      },
+      "required": ["usernameInput", "passwordInput", "loginButton"],
+      "errorMessages": {
+        "usernameRequired": "请输入登录账号！",
+        "passwordRequired": "请输入登录密码！"
+      },
+      "rules": {
+        "maxLength": "通常账号和密码有最大长度限制（例如20-50个字符）",
+        "format": "账号通常为数字或特定前缀，密码区分大小写。"
+      }
+    }
+  },
+  "required": ["loginCard"],
+  "eventHandlers": {
+    "onClickLoginButton": {
+      "description": "点击登录按钮时的执行逻辑",
+      "steps": [
+        "1. 检查用户名输入框是否为空，若为空，在输入框下方或页面提示'请输入登录账号！'，阻止提交。",
+        "2. 检查密码输入框是否为空，若为空，提示'请输入登录密码！'，阻止提交。",
+        "3. 两个字段均非空时，读取输入值，向后端发送POST请求进行身份验证。",
+        "4. 若验证失败，提示'账号或密码错误'。",
+        "5. 若验证成功，跳转至系统首页（即之前的工作流AGENT管理界面）。"
+      ]
+    }
+  }
+}

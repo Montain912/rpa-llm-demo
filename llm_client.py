@@ -4,11 +4,85 @@ DeepSeek API 兼容 OpenAI 格式
 """
 import base64
 import io
+import json
+import os
+import time
 from openai import OpenAI
 from PIL import Image
 import random
+
+
+class TokenTracker:
+    """Token 消耗追踪器：记录每次 LLM 调用的 token 用量，支持保存为 JSON"""
+
+    def __init__(self):
+        self.records = []
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_tokens = 0
+
+    def record(self, call_type: str, model: str, usage, extra: dict = None):
+        """记录一次 API 调用的 token 消耗
+        call_type: 调用类型（text/vision/planning）
+        model: 模型名
+        usage: OpenAI response.usage 对象
+        extra: 额外元数据（如 step、thought 摘要）
+        """
+        prompt_t = getattr(usage, "prompt_tokens", 0) if usage else 0
+        completion_t = getattr(usage, "completion_tokens", 0) if usage else 0
+        total_t = getattr(usage, "total_tokens", 0) if usage else 0
+
+        entry = {
+            "index": len(self.records) + 1,
+            "call_type": call_type,
+            "model": model,
+            "prompt_tokens": prompt_t,
+            "completion_tokens": completion_t,
+            "total_tokens": total_t,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if extra:
+            entry.update(extra)
+
+        self.records.append(entry)
+        self.total_prompt_tokens += prompt_t
+        self.total_completion_tokens += completion_t
+        self.total_tokens += total_t
+
+    def reset(self):
+        """重置追踪器（每次任务开始前调用）"""
+        self.records = []
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_tokens = 0
+
+    def summary(self) -> dict:
+        """返回汇总字典"""
+        return {
+            "total_calls": len(self.records),
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_completion_tokens": self.total_completion_tokens,
+            "total_tokens": self.total_tokens,
+            "calls": self.records,
+        }
+
+    def save(self, filepath: str):
+        """保存到 JSON 文件"""
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        data = self.summary()
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"[Token] 已保存 token 消耗记录到 {filepath}")
+        print(f"[Token] 共 {data['total_calls']} 次调用，"
+              f"总消耗: prompt={data['total_prompt_tokens']}, "
+              f"completion={data['total_completion_tokens']}, "
+              f"total={data['total_tokens']}")
+
+
+# 模块级单例，chat_text/chat_vision 自动记录，rpa_agent 在任务结束时保存
+token_tracker = TokenTracker()
 # DeepSeek API 配置
-API_KEY = "sk-93bdcf71df264e81af377a550b84de21"
+API_KEY = "sk-bb4bc18ea30e4ae390b49fd2e6c15d2f"
 BASE_URL = "https://api.deepseek.com/v1"
 BASE_URL_DICT = {
     "deepseekv4": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-flash","api_key":API_KEY},
@@ -64,6 +138,7 @@ def chat_text(prompt: str, system_prompt: str = "你是一个有帮助的助手�
         temperature=temperature,
         max_tokens=4096
     )
+    token_tracker.record("text", TEXT_MODEL, response.usage)
     return response.choices[0].message.content
 
 
@@ -100,6 +175,7 @@ def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一
         temperature=temperature,
         max_tokens=max_tokens
     )
+    token_tracker.record("vision", VISION_MODEL, response.usage)
     # print(response.choices[0].message)
     with open(f"./llm_output/vision_response_{r}.txt", "w") as f:
         f.write(response.choices[0].message.content)

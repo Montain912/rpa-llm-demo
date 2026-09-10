@@ -8,7 +8,7 @@ import re
 import json
 import time
 from PIL import Image
-from llm_client import chat_vision, chat_text
+from llm_client import chat_vision, chat_text, token_tracker
 from vnc_client import VNCClient
 from knowledge_loader import get_summary
 from tools import open_application, open_webpage, open_url, planning as parse_planning
@@ -55,6 +55,13 @@ SYSTEM_PROMPT = """你是一个 GUI 自动化智能体（Computer Use Agent）�
     例：{"action": "planning", "params": {}, "thought": "登录已完成，需要规划测试任务"}
 13. subtask_done(result, passed) - 【子任务完成标记】当当前子任务的操作已完成并达到预期时调用，标记该子任务完成并进入下一个子任务。result 为实际操作结果描述，passed 为是否达到预期（true/false）。所有子任务完成后输出 done()。
     例：{"action": "subtask_done", "params": {"result": "点击后显示了AGENT列表", "passed": true}, "thought": "预期结果已达成"}
+14. discover_options(category, options, task_template) - 【动态子任务发现工具】当你在执行过程中点开一个下拉框/选项列表，看到多个选项，且任务要求"测试所有""每个都试一遍"等遍历场景时使用。调用后会根据选项数量动态生成对应数量的子任务，替换当前模糊的子任务。就像人类看到有3个选项后心里会规划"那我要做3次"一样。
+    参数：
+    - category: 选项类别名称，如"助手类型"
+    - options: 识别到的所有选项列表，如["纯文本", "TTS", "虚拟人"]
+    - task_template: 每个选项对应的子任务模板，用 {opt} 占位符表示选项值
+    例：{"action": "discover_options", "params": {"category": "助手类型", "options": ["纯文本", "TTS", "虚拟人"], "task_template": "创建一个助手类型为 {opt} 的场景（场景渠道选云南大瓦特），填写必填项后保存并验证列表新增成功"}, "thought": "发现助手类型有3个选项，需要每个都创建一个场景来测试"}
+    使用时机：当你点开下拉框看到所有选项后立即调用，不要先选了一个又来回切换。调用后系统会自动替换当前子任务为N个具体子任务，你按顺序逐个执行即可。
 
 坐标规则（非常重要）：
 - x 和 y 必须是 0 到 1 之间的相对比例值（小数），表示目标点在截图宽度和高度中的位置比例
@@ -85,6 +92,8 @@ SYSTEM_PROMPT = """你是一个 GUI 自动化智能体（Computer Use Agent）�
 - 当前操作系统已在文末明确给出，严禁猜测；所有快捷键与启动方式必须与该系统匹配，禁止使用其他系统的专属操作
 - 打开应用后系统会自动最大化窗口，无需你手动最大化；若发现窗口未最大化，可用文末给出的本系统最大化快捷键
 - 当识别到当前任务正在使用的应用窗口不是最大化时，要先最大化该应用，使用文末给出的本系统最大化快捷键
+- 任务要求创建一条新的记录时必须有名称，名称格式为：“test_任务名称前两个字的英文缩写_从1开始递增，重复了的话随机加一个三位数”
+  例如：test_zj_1, test_zj_2, test_zj_3, test_zj_4, test_zj_5, test_zj_6, test_zj_7, test_zj_8, test_zj_9, test_zj_10, test_zj_11, test_zj_12, test_zj_13, test_zj_14, test_zj_15, test_zj_16, test_zj_17, test_zj_18, test_zj_19, test_zj_20, test_zj_21, test_zj_22, test_zj_23, test_zj_24, test_zj_25, test_zj_26, test_zj_27, test_zj_28, test_zj_29, test_zj_30
 - 若是当前桌面的应用与任务相关，要先强制最小化或关闭该应用，再执行任务操作
 - 坐标比例要对应截图中实际元素的位置，要准确，直接报告目标相对位置，不要自行做分辨率/缩放换算
 - 每次只执行一个操作，逐步完成任务
@@ -106,6 +115,12 @@ SYSTEM_PROMPT = """你是一个 GUI 自动化智能体（Computer Use Agent）�
     · 用上下方向键 ↑↓ 定位到目标项，然后按 Enter 确认
   - 同一页面如果有多个下拉框，**必须先在大脑里区分每个下拉框的选项范围**，避免跨下拉框串项（例如："场景渠道"的选项和"标题模型"的选项不能混选）
   - 用鼠标点列表项时，严格执行前面"坐标规则"中的"正中心"要求——瞄准高亮行整条区域的正中心
+
+- 【表单操作前置检查，极其重要】点击任何表单控件前，必须先做"读值决策"：
+  - ✅ **先读后点**：看截图中该控件当前显示的值是什么（输入框里的文字、下拉框里已选中的文本、Toggle 是 ON 还是 OFF），再决定要不要操作
+  - ✅ **已正确则跳过**：如果控件当前值已经是任务要求的目标值（如"助手类型"默认就是"纯文本"，知识里也说"一般不需要修改"）→ **直接跳过这个字段，不要点、不要改**
+  - ✅ **下拉展开后先校验**：如果下拉框已经处于展开状态，先看当前高亮/已选中的那个选项是不是目标值——是就点空白处关闭列表，不是才用键盘或鼠标切换
+  - ✅ **相邻控件防误点**：同一列里紧邻的下拉框/输入框（如"助手类型"和"标题模型"上下相邻），点击前必须在脑子里再次确认自己瞄准的是哪个控件的 y 坐标，不要让 ±0.02 的估算误差飘到上一行或下一行
 
 【本系统操作要点】
 """ + OS_SHORTCUT_HINT + """
@@ -433,6 +448,36 @@ class RPAgent:
                 print(f"  [子任务 {self.current_plan_idx + 1}/{len(self.task_plan)}] "
                       f"{passed_str}，进入下一子任务")
 
+            elif action == "discover_options":
+                # 动态子任务发现：根据下拉框选项生成 N 个具体子任务，替换当前及之后的子任务
+                category = params.get("category", "")
+                options = params.get("options", [])
+                task_template = params.get("task_template", "")
+
+                if self.current_plan_idx < 0 or not self.task_plan:
+                    print("  [发现] 不在子任务阶段，忽略 discover_options")
+                elif not options or not task_template:
+                    print(f"  [发现] 参数无效: category={category}, options={options}")
+                else:
+                    # 生成新子任务列表
+                    new_subtasks = []
+                    for opt in options:
+                        content = task_template.replace("{opt}", str(opt))
+                        new_subtasks.append({
+                            "content": content,
+                            "expected_result": f"{category}={opt} 的操作完成且验证通过",
+                            "completed": False,
+                        })
+                    # 替换当前及之后的子任务，保留之前已完成的
+                    old_count = len(self.task_plan) - self.current_plan_idx
+                    self.task_plan = self.task_plan[:self.current_plan_idx] + new_subtasks
+
+                    print(f"  [发现] {category} 有 {len(options)} 个选项: {options}")
+                    print(f"  [发现] 已生成 {len(new_subtasks)} 个子任务，"
+                          f"替换原计划中第 {self.current_plan_idx + 1} 个及之后的 {old_count} 个子任务")
+                    for i, st in enumerate(new_subtasks, 1):
+                        print(f"    {i}. {st['content']}")
+
             else:
                 print(f"未知动作: {action}")
                 time.sleep(1)
@@ -462,6 +507,7 @@ class RPAgent:
           "done"         - 模型输出 done，任务全部结束
           "planned"      - planning 已生成子任务计划（固定流程阶段据此进入子任务阶段）
           "subtask_done" - 当前子任务完成（子任务阶段据此推进到下一子任务）
+          "discover"     - discover_options 动态扩展了子任务列表（不推进 idx，重新获取当前子任务）
           "stop"         - 外部终止
         """
         # 0. 外部控制检查：终止则结束任务，暂停则等待恢复
@@ -608,6 +654,8 @@ class RPAgent:
             return "planned"
         if plan is not None and action_name == "subtask_done":
             return "subtask_done"
+        if plan is not None and action_name == "discover_options":
+            return "discover"
         return "continue"
 
     def run_task(self, task: str, progress_callback=None, control_checker=None) -> str:
@@ -627,6 +675,7 @@ class RPAgent:
         self._subtask_result = None
         self._prev_screenshot = None
         self._repeat_guidance = ""
+        token_tracker.reset()
         self.vnc.connect()
 
         # 加载知识摘要：按任务文本匹配页面知识，注入后续每步 prompt
@@ -654,9 +703,11 @@ class RPAgent:
                 if status == "planned":
                     break
 
-            # 阶段2：子任务执行，for 循环逐个推进，每个子任务独立内循环直到 subtask_done
+            # 阶段2：子任务执行，while 循环逐个推进（支持 discover_options 动态扩展子任务）
             if self.task_plan:
-                for plan_idx, plan in enumerate(self.task_plan):
+                plan_idx = 0
+                while plan_idx < len(self.task_plan) and self.step < self.max_steps:
+                    plan = self.task_plan[plan_idx]
                     self.current_plan_idx = plan_idx
                     print(f"[规划] 开始子任务 {plan_idx + 1}/{len(self.task_plan)}: {plan['content']}")
                     while self.step < self.max_steps:
@@ -666,23 +717,33 @@ class RPAgent:
                             return f"任务已手动终止，共执行 {self.step} 步。"
                         if status == "done":
                             return f"任务完成！共执行 {self.step} 步。"
+                        if status == "discover":
+                            # discover_options 已动态替换当前及之后的子任务
+                            # 不推进 plan_idx，重新获取当前子任务（已被替换为第一个新子任务）
+                            plan = self.task_plan[plan_idx]
+                            print(f"[规划] 子任务已动态更新，当前: {plan['content']}")
+                            continue
                         if status == "subtask_done":
-                            # 写入本子任务结果，break 内循环后由 for 推进到下一子任务
+                            # 写入本子任务结果，break 内循环后由外层 while 推进到下一子任务
                             res = self._subtask_result or {}
                             plan["completed"] = True
                             plan["actual_result"] = res.get("result", "")
                             plan["passed"] = res.get("passed", False)
                             self._subtask_result = None
                             break
+                    plan_idx += 1
 
                 print(f"[规划] 全部 {len(self.task_plan)} 个子任务已执行完成")
 
             if self.step >= self.max_steps:
-                return f"已达到最大步数 ({self.max_steps})，任务可能未完成。"
-            return f"任务完成！共执行 {self.step} 步。"
+                result_msg = f"已达到最大步数 ({self.max_steps})，任务可能未完成。"
+            else:
+                result_msg = f"任务完成！共执行 {self.step} 步。"
+            return result_msg
 
         finally:
             self.vnc.disconnect()
+            token_tracker.save(f"./summary/token_usage_{self.rand}.json")
 
     def saveScreenShot(self, step: int, rand: int, screenshot: Image.Image):
         screenshot.save(f"./screenshots/sh_{rand}_{step}.png")
