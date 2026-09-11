@@ -1,15 +1,46 @@
 [
     {
+        "name": "通用文本输入与输入法",
+        "description": "所有GUI字段输入的验收、纠错和输入法操作规则",
+        "filePath": "./text_input.json",
+        "parentPage": "",
+        "always": true
+    },
+    {
+        "name": "浏览器导航与网址输入",
+        "description": "浏览器窗口、地址栏输入和网址导航故障诊断",
+        "filePath": "./browser_navigation.json",
+        "parentPage": "浏览器",
+        "keywords": ["浏览器", "网址", "网页", "http://", "https://", "Edge", "Chrome"]
+    },
+    {
+        "name": "体验中心智能体能力查询",
+        "description": "体验中心的智能体能力页面只读筛选、场景名称搜索、重置与退出登录流程",
+        "filePath": "./experience_center_agent_capability.json",
+        "parentPage": "体验中心",
+        "keywords": [
+            "体验中心",
+            "智能体能力",
+            "智能问数",
+            "新SQL生成",
+            "测试类型",
+            "测试场景名称",
+            "场景名称搜索"
+        ]
+    },
+    {
         "name": "工作流AGENT",
         "description": "工作流AGENT页面",
         "filePath": "./工作流AGENT.json",
-        "parentPage": "AGENT管理"
+        "parentPage": "AGENT管理",
+        "keywords": ["工作流AGENT", "工作流智能体"]
     },
     {
         "name": "添加助手场景",
         "description": "工作流AGENT的添加助手场景功能，包含表单结构、操作步骤、测试用例和常见陷阱",
         "filePath": "./添加助手场景.json",
-        "parentPage": "工作流AGENT"
+        "parentPage": "工作流AGENT",
+        "keywords": ["添加助手", "新增助手", "创建助手", "助手场景"]
     },
     {
         "name": "login页面",

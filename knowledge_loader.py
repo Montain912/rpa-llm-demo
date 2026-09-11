@@ -3,7 +3,7 @@
 - 加载 ./knowledge/index.json 作为导航
 - 按任务文本匹配页面知识条目
 - 将 Schema 结构转换为 LLM 可读的文本摘要
-- 带内存缓存 + 文件缓存（以文件 mtime 失效）
+- 带内存缓存 + 文件缓存（以文件 mtime 和摘要器版本失效）
 """
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from pathlib import Path
 
 KNOWLEDGE_DIR = Path(__file__).parent / "knowledge"
 CACHE_FILE = KNOWLEDGE_DIR / ".cache" / "summaries.json"
+SUMMARIZER_VERSION = "2026-09-query-v2"
 
-# 内存缓存：file_path -> {mtime, summary}
+# 内存缓存：file_path -> {mtime, version, summary}
 _memory_cache: dict[str, dict] = {}
 
 
@@ -35,53 +36,158 @@ def _resolve_path(file_path: str) -> Path:
     return p
 
 
-def match_by_task(task: str) -> dict | None:
-    """
-    按任务文本匹配知识条目：
-    1. 任务文本包含 name → 命中（优先级最高）
-    2. 关键词双向匹配：name 中的关键词出现在任务中，或任务中的关键词出现在 name 中 → 命中
-    3. 任务文本包含 description 关键词 → 命中
-    4. 任务文本包含 parentPage → 命中
-    """
-    task_lower = task.lower()
-    entries = load_index()
-    if not entries:
+def _entry_depth(entry: dict, entries_by_name: dict[str, dict]) -> int:
+    """返回条目在索引父子关系中的深度，循环或缺失父节点时安全停止。"""
+    depth = 0
+    current = entry
+    visited: set[str] = set()
+    while True:
+        parent = str(current.get("parentPage", "")).strip().lower()
+        if not parent or parent in visited or parent not in entries_by_name:
+            return depth
+        visited.add(parent)
+        depth += 1
+        current = entries_by_name[parent]
+
+
+def _entry_match_rank(
+    entry: dict,
+    task_lower: str,
+    entries_by_name: dict[str, dict],
+    index: int,
+) -> tuple[int, int, int, int] | None:
+    """计算显式匹配排名；不再把名称拆成单字符进行模糊拼接。"""
+    name = str(entry.get("name", "")).strip()
+    description = str(entry.get("description", "")).strip()
+    parent = str(entry.get("parentPage", "")).strip()
+    keywords = entry.get("keywords", [])
+    if isinstance(keywords, str):
+        keywords = [keywords]
+    elif not isinstance(keywords, (list, tuple, set)):
+        keywords = []
+    matched_keywords = [
+        str(keyword).strip()
+        for keyword in keywords
+        if str(keyword).strip() and str(keyword).strip().lower() in task_lower
+    ]
+
+    match_class = 0
+    evidence_length = 0
+    evidence_count = 0
+    if name and name.lower() in task_lower:
+        match_class = 4
+        evidence_length = len(name)
+        evidence_count = 1
+    if matched_keywords:
+        keyword_length = sum(len(keyword) for keyword in set(matched_keywords))
+        keyword_count = len(set(matched_keywords))
+        if match_class < 3:
+            match_class = 3
+            evidence_length = keyword_length
+            evidence_count = keyword_count
+        else:
+            evidence_length += keyword_length
+            evidence_count += keyword_count
+    if description and description.lower() in task_lower and match_class < 2:
+        match_class = 2
+        evidence_length = len(description)
+        evidence_count = 1
+    if parent and parent.lower() in task_lower and match_class < 1:
+        match_class = 1
+        evidence_length = len(parent)
+        evidence_count = 1
+    if not match_class:
         return None
 
-    # 第一优先级：name 完整包含在任务中
-    for e in entries:
-        name = e.get("name", "")
-        if name and name.lower() in task_lower:
-            return e
+    return (
+        match_class,
+        _entry_depth(entry, entries_by_name),
+        evidence_count * 1000 + evidence_length,
+        -index,
+    )
 
-    # 第二优先级：关键词双向匹配（适用于同义词/近义词场景）
-    # 提取 name 中的核心关键词（去掉常见动词），看是否在任务中出现
-    skip_words = {"添加", "创建", "新增", "新建", "编辑", "修改", "删除", "查看", "查询", "测试", "的", "了", "一个"}
-    for e in entries:
-        name = e.get("name", "")
-        if not name:
+
+def _is_ancestor(
+    possible_ancestor: dict,
+    descendant: dict,
+    entries_by_name: dict[str, dict],
+) -> bool:
+    ancestor_name = str(possible_ancestor.get("name", "")).strip().lower()
+    if not ancestor_name:
+        return False
+    current = descendant
+    visited: set[str] = set()
+    while True:
+        parent = str(current.get("parentPage", "")).strip().lower()
+        if not parent or parent in visited:
+            return False
+        if parent == ancestor_name:
+            return True
+        visited.add(parent)
+        current = entries_by_name.get(parent)
+        if current is None:
+            return False
+
+
+def match_entries_by_task(task: str) -> list[dict]:
+    """返回所有相关的非 always 条目，并剔除已命中子页面的祖先条目。"""
+    task_lower = str(task or "").lower()
+    entries = load_index()
+    entries_by_name = {
+        str(entry.get("name", "")).strip().lower(): entry
+        for entry in entries
+        if str(entry.get("name", "")).strip()
+    }
+    ranked: list[tuple[tuple[int, int, int, int], int, dict]] = []
+    for index, entry in enumerate(entries):
+        if entry.get("always") is True:
             continue
-        name_lower = name.lower()
-        # 提取关键词：去掉跳过词后的每个字/词
-        name_keywords = [w for w in name if w not in skip_words]
-        # 如果 name 的关键词大部分都出现在任务中，认为匹配
-        hit_count = sum(1 for kw in name_keywords if kw in task_lower and kw.strip())
-        if hit_count >= max(2, len(name_keywords) * 0.5):
-            return e
+        rank = _entry_match_rank(entry, task_lower, entries_by_name, index)
+        if rank is not None:
+            ranked.append((rank, index, entry))
 
-    # 第三优先级：反向匹配 - 任务关键词出现在 description 中
-    for e in entries:
-        desc = e.get("description", "")
-        if desc and desc.lower() in task_lower:
-            return e
+    matched = [item[2] for item in ranked]
+    most_specific = [
+        entry
+        for entry in matched
+        if not any(
+            entry is not other and _is_ancestor(entry, other, entries_by_name)
+            for other in matched
+        )
+    ]
+    # 摘要按索引顺序输出，使通用浏览器规则自然排在具体页面规则之前。
+    selected_ids = {id(entry) for entry in most_specific}
+    return [entry for entry in entries if id(entry) in selected_ids]
 
-    # 第四优先级：parentPage 匹配（匹配度最低，返回最顶层的即可）
-    for e in entries:
-        parent = e.get("parentPage", "")
-        if parent and parent.lower() in task_lower:
-            return e
 
-    return None
+def match_by_task(task: str) -> dict | None:
+    """兼容旧调用：返回相关非 always 条目中排名最高、最具体的一条。"""
+    matches = match_entries_by_task(task)
+    if not matches:
+        return None
+    task_lower = str(task or "").lower()
+    entries = load_index()
+    entries_by_name = {
+        str(entry.get("name", "")).strip().lower(): entry
+        for entry in entries
+        if str(entry.get("name", "")).strip()
+    }
+    index_by_key = {
+        (str(entry.get("name", "")), str(entry.get("filePath", ""))): index
+        for index, entry in enumerate(entries)
+    }
+    return max(
+        matches,
+        key=lambda entry: _entry_match_rank(
+            entry,
+            task_lower,
+            entries_by_name,
+            index_by_key.get(
+                (str(entry.get("name", "")), str(entry.get("filePath", ""))),
+                len(entries),
+            ),
+        ) or (0, 0, 0, 0),
+    )
 
 
 def load_knowledge(entry: dict) -> dict | None:
@@ -132,6 +238,37 @@ def _describe_fields(props: dict) -> list[str]:
     return lines
 
 
+def _summarize_automation_guidance(data: dict) -> list[str]:
+    """摘要通用执行规则和基于可见现象的有限恢复策略。"""
+    guidance = data.get("automationGuidance", {})
+    if not isinstance(guidance, dict) or not guidance:
+        return []
+    parts = []
+    rules = guidance.get("rules", [])
+    if rules:
+        parts.append("- 自动化执行规则:")
+        parts.extend(f"  - {rule}" for rule in rules)
+    diagnostics = guidance.get("diagnostics", [])
+    if diagnostics:
+        parts.append("- 故障诊断:")
+    for item in diagnostics:
+        if not isinstance(item, dict):
+            continue
+        symptom = item.get("symptom", "未知现象")
+        cause = item.get("cause", "待判断")
+        action = item.get("action", "停止并报告")
+        retry = item.get("maxRetries")
+        retry_text = f"；最多重试 {retry} 次" if retry is not None else ""
+        parts.append(
+            f"  - 现象：{symptom}；可能原因：{cause}；处理：{action}{retry_text}"
+        )
+    operations = guidance.get("inputMethodOperations", [])
+    if operations:
+        parts.append("- 输入法封装操作:")
+        parts.extend(f"  - {operation}" for operation in operations)
+    return parts
+
+
 def _summarize_operation_guide(data: dict) -> str:
     """将操作指南型知识（如添加助手场景）转换为 LLM 可读的文本摘要"""
     parts = []
@@ -146,9 +283,21 @@ def _summarize_operation_guide(data: dict) -> str:
     loc = data.get("pageLocation", {})
     if loc:
         parts.append(f"- 页面路径: {loc.get('navPath', '')}")
+        login_url = loc.get("loginUrl", "")
+        if login_url:
+            parts.append(f"- 登录网址: {login_url}")
         entry = loc.get("entryButton", {})
         if entry:
             parts.append(f"- 入口按钮: {entry.get('name', '')}（{entry.get('position', '')}）")
+
+    scope = data.get("scopeGuard", {})
+    if isinstance(scope, dict) and scope:
+        allowed = scope.get("allowedOperations", [])
+        forbidden = scope.get("forbiddenOperations", [])
+        if allowed:
+            parts.append(f"- 本任务允许的操作: {', '.join(map(str, allowed))}")
+        if forbidden:
+            parts.append(f"- 严禁执行的操作: {', '.join(map(str, forbidden))}")
 
     # 必填字段
     required = data.get("requiredFields", [])
@@ -187,6 +336,26 @@ def _summarize_operation_guide(data: dict) -> str:
                 else:
                     opt_text = f" 选项（前5个）: {', '.join(options[:5])}..."
             parts.append(f"  • {label}{req_mark} ({typ}){default_text}{opt_text}")
+            visual_parts = []
+            if info.get("hasVisibleText") is False:
+                visual_parts.append("无可见文字")
+            for key, title in (
+                ("container", "容器"),
+                ("position", "相对位置"),
+                ("visualFeature", "视觉特征"),
+                ("stableTargetName", "动作目标名"),
+                ("interactionRule", "交互规则"),
+            ):
+                value = info.get(key)
+                if value is not None and str(value).strip():
+                    visual_parts.append(f"{title}: {value}")
+            if info.get("requiresUserMenu") is False:
+                visual_parts.append("无需展开用户菜单")
+            click_count = info.get("clickCount")
+            if click_count is not None:
+                visual_parts.append(f"点击次数: {click_count}")
+            if visual_parts:
+                parts.append(f"    视觉/交互锚点: {'；'.join(visual_parts)}")
 
     # 标准操作流程
     guide = data.get("operationGuide", {})
@@ -228,6 +397,8 @@ def _summarize_operation_guide(data: dict) -> str:
         parts.append(f"- 参考测试用例（共 {len(test_cases)} 个）:")
         for tc in test_cases[:3]:
             parts.append(f"  • {tc.get('caseId', '')}: {tc.get('caseName', '')}")
+
+    parts.extend(_summarize_automation_guidance(data))
 
     return "\n".join(parts)
 
@@ -324,48 +495,75 @@ def summarize_for_prompt(data: dict) -> str:
         if toolbar:
             parts.append(f"- 画布页底部工具栏: {', '.join(toolbar.get('properties', {}).keys())}")
 
+    parts.extend(_summarize_automation_guidance(data))
+
     return "\n".join(parts)
 
 
-def get_summary(task: str) -> str:
-    """
-    对外入口：根据任务文本获取知识摘要（带缓存）
-    未匹配返回空字符串
-    """
-    entry = match_by_task(task)
-    if not entry:
-        return ""
+def _cache_record_is_valid(record: dict | None, mtime: float) -> bool:
+    return bool(
+        isinstance(record, dict)
+        and record.get("mtime") == mtime
+        and record.get("version") == SUMMARIZER_VERSION
+        and isinstance(record.get("summary"), str)
+    )
 
+
+def _get_entry_summary(entry: dict) -> str:
+    """获取单个知识条目的版本化摘要。"""
     fp = entry.get("filePath", "")
+    if not fp:
+        return ""
     abs_path = _resolve_path(fp)
 
-    # 文件 mtime 作为缓存键（文件修改即失效）
     try:
         mtime = abs_path.stat().st_mtime
     except OSError:
         mtime = 0
 
-    # 内存缓存命中
     cached = _memory_cache.get(fp)
-    if cached and cached.get("mtime") == mtime:
+    if _cache_record_is_valid(cached, mtime):
         return cached["summary"]
 
-    # 生成摘要
+    cached_from_file = _load_from_file_cache(fp)
+    if _cache_record_is_valid(cached_from_file, mtime):
+        _memory_cache[fp] = cached_from_file
+        return cached_from_file["summary"]
+
     data = load_knowledge(entry)
     if not data:
         return ""
     summary = summarize_for_prompt(data)
-
-    # 写内存缓存
-    _memory_cache[fp] = {"mtime": mtime, "summary": summary}
-
-    # 异步持久化到文件缓存（best-effort，失败不影响）
+    record = {
+        "mtime": mtime,
+        "version": SUMMARIZER_VERSION,
+        "summary": summary,
+    }
+    _memory_cache[fp] = record
     try:
         _persist_cache(fp, mtime, summary)
     except Exception:
         pass
-
     return summary
+
+
+def get_summary(task: str) -> str:
+    """组合所有 always 知识与任务命中的最具体知识摘要。"""
+    entries = load_index()
+    selected = [entry for entry in entries if entry.get("always") is True]
+    selected.extend(match_entries_by_task(task))
+
+    unique = []
+    seen_paths: set[str] = set()
+    for entry in selected:
+        path = str(entry.get("filePath", ""))
+        if not path or path in seen_paths:
+            continue
+        seen_paths.add(path)
+        unique.append(entry)
+    return "\n\n".join(
+        summary for summary in map(_get_entry_summary, unique) if summary
+    )
 
 
 def _persist_cache(file_path: str, mtime: float, summary: str) -> None:
@@ -381,7 +579,11 @@ def _persist_cache(file_path: str, mtime: float, summary: str) -> None:
         except (json.JSONDecodeError, OSError):
             existing = {}
 
-    existing[file_path] = {"mtime": mtime, "summary": summary}
+    existing[file_path] = {
+        "mtime": mtime,
+        "version": SUMMARIZER_VERSION,
+        "summary": summary,
+    }
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2)
 
@@ -389,30 +591,7 @@ def _persist_cache(file_path: str, mtime: float, summary: str) -> None:
 def warmup_cache() -> None:
     """启动时预加载所有知识摘要到内存缓存"""
     for entry in load_index():
-        fp = entry.get("filePath", "")
-        if not fp:
-            continue
-        abs_path = _resolve_path(fp)
-        if not abs_path.exists():
-            continue
-        try:
-            mtime = abs_path.stat().st_mtime
-        except OSError:
-            continue
-        # 先尝试文件缓存
-        cached_from_file = _load_from_file_cache(fp)
-        if cached_from_file and cached_from_file.get("mtime") == mtime:
-            _memory_cache[fp] = cached_from_file
-            continue
-        # 文件缓存未命中，重新生成
-        data = load_knowledge(entry)
-        if data:
-            summary = summarize_for_prompt(data)
-            _memory_cache[fp] = {"mtime": mtime, "summary": summary}
-            try:
-                _persist_cache(fp, mtime, summary)
-            except Exception:
-                pass
+        _get_entry_summary(entry)
 
 
 def _load_from_file_cache(file_path: str) -> dict | None:

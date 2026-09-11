@@ -34,7 +34,8 @@ VNC_CONFIG = {
     "host": "172.20.195.63",
     "port": 5900,
     "user": "do fish",
-    "password": "219912"
+    "password": "219912",
+    "system": "win",
 }
 
 state_lock = threading.Lock()
@@ -52,7 +53,8 @@ def _get_screenshot_vnc() -> VNCClient:
             host=VNC_CONFIG["host"],
             port=VNC_CONFIG["port"],
             user=VNC_CONFIG["user"],
-            password=VNC_CONFIG["password"]
+            password=VNC_CONFIG["password"],
+            system=VNC_CONFIG["system"],
         )
         vnc.connect()
         _screenshot_vnc = vnc
@@ -98,7 +100,9 @@ def run_agent_task(task: str):
     agent = RPAgent(
         vnc_host=VNC_CONFIG["host"],
         vnc_port=VNC_CONFIG["port"],
-        vnc_password=VNC_CONFIG["password"]
+        vnc_password=VNC_CONFIG["password"],
+        vnc_user=VNC_CONFIG["user"],
+        system=VNC_CONFIG["system"],
     )
 
     def progress_callback(step_info):

@@ -7,9 +7,13 @@ import io
 import json
 import os
 import time
+from pathlib import Path
 from openai import OpenAI
 from PIL import Image
 import random
+
+
+LLM_OUTPUT_DIR = Path(__file__).resolve().parent / "llm_output"
 
 
 class TokenTracker:
@@ -82,7 +86,7 @@ class TokenTracker:
 # 模块级单例，chat_text/chat_vision 自动记录，rpa_agent 在任务结束时保存
 token_tracker = TokenTracker()
 # DeepSeek API 配置
-API_KEY = "sk-bb4bc18ea30e4ae390b49fd2e6c15d2f"
+API_KEY = "sk-1df179c2de574ed58dd3d91b9211a9e3"
 BASE_URL = "https://api.deepseek.com/v1"
 BASE_URL_DICT = {
     "deepseekv4": {"base_url": "https://api.deepseek.com/v1", "model": "deepseek-v4-flash","api_key":API_KEY},
@@ -142,15 +146,27 @@ def chat_text(prompt: str, system_prompt: str = "你是一个有帮助的助手�
     return response.choices[0].message.content
 
 
-def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一个视觉助手，能够分析截图并描述界面元素。", temperature: float = 0.5, max_tokens: int = 1024) -> str:
+def chat_vision(
+    prompt: str,
+    image: Image.Image,
+    system_prompt: str = "你是一个视觉助手，能够分析截图并描述界面元素。",
+    temperature: float = 0.5,
+    max_tokens: int = 1024,
+    image_format: str = "JPEG",
+) -> str:
     """
     调用视觉模型，传入截图进行分析
     默认低温度 + 小 max_tokens：决策类输出只需一个小 JSON，缩短生成时间
     """
     r = random.randint(0, 1000000)
     img = shrink_for_llm(image)
-    img_base64 = image_to_base64(img, format="JPEG")
-    image.save(f"./llm_output/screenshot_{r}.png")
+    normalized_format = str(image_format or "JPEG").upper()
+    if normalized_format not in {"JPEG", "PNG"}:
+        normalized_format = "JPEG"
+    mime_subtype = "png" if normalized_format == "PNG" else "jpeg"
+    img_base64 = image_to_base64(img, format=normalized_format)
+    LLM_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    image.save(LLM_OUTPUT_DIR / f"screenshot_{r}.png")
     
     
     response = client.chat.completions.create(
@@ -164,7 +180,7 @@ def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{img_base64}",
+                            "url": f"data:image/{mime_subtype};base64,{img_base64}",
                             "detail": "auto"
                         }
                     }
@@ -177,7 +193,7 @@ def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一
     )
     token_tracker.record("vision", VISION_MODEL, response.usage)
     # print(response.choices[0].message)
-    with open(f"./llm_output/vision_response_{r}.txt", "w") as f:
+    with open(LLM_OUTPUT_DIR / f"vision_response_{r}.txt", "w", encoding="utf-8") as f:
         f.write(response.choices[0].message.content)
     # print("----------",response.choices[0].message.content)
     return response.choices[0].message.content

@@ -406,6 +406,7 @@
                 <button id="vncToggleBtn" onclick="toggleVNC()">🔗 连接桌面</button>
             </div>
             <div class="desktop-view" id="desktopView">
+                <img id="screenshotFallback" alt="远程桌面截图" style="display:none;">
                 <div id="vncCanvas" style="display:none;"></div>
                 <div id="vncPlaceholder" class="desktop-placeholder">
                     <p>🖥️ 点击"连接桌面"开始远程操作</p>
@@ -576,9 +577,17 @@
         function appendStep(step) {
             if (step.step <= lastStep) return;
             const actionText = formatAction(step.action, step.params);
+            const escapeStepText = value => String(value ?? '').replace(/[&<>"']/g,
+                ch => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[ch]));
+            const inputFailed = step.input_verification?.passed === false;
+            const status = step.executed === false ? '【未执行】' :
+                inputFailed ? '【输入验收未通过】' : '';
+            const feedback = step.execution_feedback
+                ? `<div>${escapeStepText(step.execution_feedback)}</div>` : '';
             addMessage('agent',
-                `<div>步骤 ${step.step}: ${step.thought}</div>
-                 <div class="step-action">${actionText}</div>`,
+                `<div>步骤 ${step.step}: ${status}${escapeStepText(status ? step.execution_feedback || '动作未获执行' : step.thought)}</div>
+                 <div class="step-action">${escapeStepText(actionText)}</div>
+                 ${status ? '' : feedback}`,
                 step
             );
             lastStep = step.step;
@@ -762,22 +771,28 @@
             fetch('/api/screenshot')
                 .then(res => res.json())
                 .then(data => {
-                    const view = document.getElementById('desktopView');
+                    const screenshot = document.getElementById('screenshotFallback');
+                    const placeholder = document.getElementById('vncPlaceholder');
                     if (data.success) {
-                        view.innerHTML = `<img src="${data.screenshot}" alt="远程桌面">`;
+                        screenshot.src = data.screenshot;
+                        screenshot.style.display = 'block';
+                        placeholder.style.display = 'none';
                     } else {
-                        view.innerHTML = `<div class="desktop-placeholder" style="color: #ff6b6b;">
-                            <p>❌ 获取截图失败</p>
-                            <p style="font-size: 12px; margin-top: 8px;">${data.error}</p>
-                        </div>`;
+                        screenshot.style.display = 'none';
+                        placeholder.style.display = 'block';
+                        placeholder.style.color = '#ff6b6b';
+                        placeholder.innerHTML = `<p>❌ 获取截图失败</p>
+                            <p style="font-size: 12px; margin-top: 8px;">${data.error}</p>`;
                     }
                 })
                 .catch(err => {
-                    document.getElementById('desktopView').innerHTML = 
-                        `<div class="desktop-placeholder" style="color: #ff6b6b;">
-                            <p>❌ 网络错误</p>
-                            <p style="font-size: 12px; margin-top: 8px;">${err.message}</p>
-                        </div>`;
+                    const screenshot = document.getElementById('screenshotFallback');
+                    const placeholder = document.getElementById('vncPlaceholder');
+                    screenshot.style.display = 'none';
+                    placeholder.style.display = 'block';
+                    placeholder.style.color = '#ff6b6b';
+                    placeholder.innerHTML = `<p>❌ 网络错误</p>
+                        <p style="font-size: 12px; margin-top: 8px;">${err.message}</p>`;
                 });
         }
 
@@ -923,6 +938,7 @@
             rfb.resizeSession = false;
 
             rfb.addEventListener('connect', () => {
+                document.getElementById('screenshotFallback').style.display = 'none';
                 canvas.style.display = 'block';
                 document.getElementById('vncPlaceholder').style.display = 'none';
                 document.getElementById('vncToggleBtn').textContent = '🔌 断开桌面';
@@ -933,7 +949,14 @@
                 const clean = e.detail && e.detail.clean;
                 rfb = null;
                 canvas.style.display = 'none';
-                document.getElementById('vncPlaceholder').style.display = 'block';
+                const screenshot = document.getElementById('screenshotFallback');
+                const placeholder = document.getElementById('vncPlaceholder');
+                if (screenshot.src) {
+                    screenshot.style.display = 'block';
+                    placeholder.style.display = 'none';
+                } else {
+                    placeholder.style.display = 'block';
+                }
                 document.getElementById('vncToggleBtn').textContent = '🔗 连接桌面';
                 if (!clean) {
                     addMessage('system', '⚠️ VNC 连接断开，可重新点击连接');
@@ -966,7 +989,14 @@
                 try { r.disconnect(); } catch (e) {}
             }
             document.getElementById('vncCanvas').style.display = 'none';
-            document.getElementById('vncPlaceholder').style.display = 'block';
+            const screenshot = document.getElementById('screenshotFallback');
+            const placeholder = document.getElementById('vncPlaceholder');
+            if (screenshot.src) {
+                screenshot.style.display = 'block';
+                placeholder.style.display = 'none';
+            } else {
+                placeholder.style.display = 'block';
+            }
             document.getElementById('vncToggleBtn').textContent = '🔗 连接桌面';
         }
     </script>

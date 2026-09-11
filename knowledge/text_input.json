@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "通用文本输入与输入法操作",
+  "description": "适用于网址、账号、密码、数字、代码、中文和普通文本的输入检查与有限纠错规则。",
+  "type": "object",
+  "automationGuidance": {
+    "rules": [
+      "所有字段首次输入使用 skill_input_text(text, field_type)，网址使用 skill_open_url；输入技能只输入、不提交。",
+      "下一张截图必须调用 verify_text_input 验收；执行器确认后才能点击下一字段、Tab、Enter 或提交。",
+      "重命名、文件名和场景名称等精确文本在提交后还必须读取最终显示值并逐字符比较。",
+      "输入失败时只能根据截图可见证据判断 ime、focus、partial 或 format，并做至多一次针对性纠错。",
+      "一次纠错后仍不正确时停止当前输入路径并报告可见现象，不得带着未确认文本继续。"
+    ],
+    "diagnostics": [
+      {
+        "symptom": "期望 ASCII 却出现候选框、非预期中文或全角字符，或期望中文却只出现拼音字母",
+        "cause": "当前输入法语言模式与字段要求不一致",
+        "action": "调用 retry_text_input(text, field_type, cause='ime')，取消组合串、切换一次语言模式并替换字段",
+        "maxRetries": 1
+      },
+      {
+        "symptom": "输入后字段没有变化，且没有候选框",
+        "cause": "目标字段未聚焦或窗口未获得焦点",
+        "action": "重新点击原字段中心，再调用 retry_text_input(..., cause='focus')，不得切换输入法",
+        "maxRetries": 1
+      },
+      {
+        "symptom": "字段只出现目标文本的一部分",
+        "cause": "按键丢失、控件响应慢或文本被截断",
+        "action": "调用 retry_text_input(..., cause='partial') 全选替换",
+        "maxRetries": 1
+      },
+      {
+        "symptom": "内容完整但存在全角标点、空格或字段格式问题",
+        "cause": "字段类型或字符规范不匹配",
+        "action": "调用 retry_text_input(..., cause='format') 按字段类型规范化后替换",
+        "maxRetries": 1
+      }
+    ]
+  }
+}

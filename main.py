@@ -14,6 +14,23 @@ import threading
 from datetime import datetime
 from typing import Optional
 
+
+def _configure_console_stream(stream) -> None:
+    """Keep redirected Windows logs from crashing on Unicode model output."""
+    reconfigure = getattr(stream, "reconfigure", None)
+    if not callable(reconfigure):
+        return
+    try:
+        reconfigure(encoding="utf-8", errors="backslashreplace")
+    except (OSError, TypeError, ValueError):
+        # Some embedded/test streams cannot be reconfigured.  Logging must
+        # never prevent the agent from continuing its guarded execution.
+        pass
+
+
+_configure_console_stream(sys.stdout)
+_configure_console_stream(sys.stderr)
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -46,10 +63,10 @@ task_state = {
 
 # 全局 VNC 配置
 VNC_CONFIG = {
-    "host": "host.docker.internal",  #172.20.195.63
-    "port": 5901,   # 5900
+    "host": "127.0.0.1",
+    "port": 5901,
     "user": "",
-    "password": "123456",
+    "password": "LocalVNC",
     "system": "win"
 }
 
@@ -72,7 +89,8 @@ def _get_screenshot_vnc() -> VNCClient:
             host=VNC_CONFIG["host"],
             port=VNC_CONFIG["port"],
             user=VNC_CONFIG["user"],
-            password=VNC_CONFIG["password"]
+            password=VNC_CONFIG["password"],
+            system=VNC_CONFIG["system"],
         )
         vnc.connect()
         _screenshot_vnc = vnc
@@ -213,7 +231,9 @@ def run_agent_task(task: str):
     agent = RPAgent(
         vnc_host=VNC_CONFIG["host"],
         vnc_port=VNC_CONFIG["port"],
-        vnc_password=VNC_CONFIG["password"]
+        vnc_password=VNC_CONFIG["password"],
+        vnc_user=VNC_CONFIG["user"],
+        system=VNC_CONFIG["system"],
     )
 
     def progress_callback(step_info):
@@ -464,7 +484,7 @@ def test_connection(req: ConnectionTestRequest):
         host = req.host or VNC_CONFIG["host"]
         port = req.port if req.port is not None else VNC_CONFIG["port"]
         password = req.password or VNC_CONFIG["password"]
-        print("host--port--password:",host,"--",port,"--",password)
+        print(f"VNC test target: {host}:{port}")
 
         vnc = VNCClient(host=host, port=port, password=password)
         vnc.connect()
