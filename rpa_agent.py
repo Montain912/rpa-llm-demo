@@ -1299,6 +1299,37 @@ class RPAgent:
         mode = str(result.get("mode", "")).lower().strip()
         return mode if mode in {"english", "chinese"} and result.get("evidence") else "unknown"
 
+    def _confirm_login_input_focus(self, field: str) -> bool:
+        """Never send replacement keys to an unconfirmed login field."""
+        if field not in {"username", "password"}:
+            return True
+        label = "用户名/账号" if field == "username" else "密码"
+        try:
+            check = self._verify_visible_state(
+                self.vnc.screenshot(),
+                objective=f"输入前确认{label}框焦点，尚未发送全选或文字",
+                expected_result=(f"当前键盘焦点确实位于{label}输入框内部，存在本字段内的插入光标、"
+                    "局限于本字段的文本选区或明确的输入框聚焦样式。仅鼠标悬停、"
+                    "占位文字、已有账号/密码或点击坐标不能证明焦点。若多个页面文字"
+                    "（如标题、按钮、占位符）同时被选中，这是整页选区，必须不通过。"
+                    "看不清焦点或焦点在其他字段时必须不通过；无需识读或返回账号密码内容。"),
+            )
+        except Exception as exc:
+            check = {"passed": False, "reason": f"焦点检查失败：{type(exc).__name__}"}
+        self._last_state_verification = check
+        if check.get("passed") is True:
+            return True
+        self._repeat_guidance = (
+            f"输入前未确认{label}框焦点，本次未发送全选、删除或文字。"
+            "请根据新截图重新定位同一输入框的文字行中心，再执行原登录阶段；"
+            "不要直接重输、按Tab或把整页选区当成字段选区。"
+        )
+        pending = self.pending_input or {}
+        if pending.get("field_type") == field:
+            pending["refocused"] = False
+            self._repeat_guidance += "当前有待纠错字段，先重新点击该字段后再执行原原因的纠错。"
+        return False
+
     def _input_once(
         self,
         text,
@@ -1327,6 +1358,8 @@ class RPAgent:
             )
             return False
 
+        if not self._confirm_login_input_focus(field):
+            return False
         if field == "url" and str(self.system).lower() in {"win", "windows", "win32"}:
             try:
                 self.vnc.ime.ensure_english(self._read_focused_ime_mode)
@@ -1425,6 +1458,8 @@ class RPAgent:
             self._repeat_guidance = self.failure_reason
             return False
 
+        if not self._confirm_login_input_focus(field):
+            return False
         ime_was_switched = any(
             signature.startswith(("toggle_language:", "cycle_layout:"))
             for signature in self.ime_operation_counts

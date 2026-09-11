@@ -293,6 +293,11 @@ class InputMethodTests(unittest.TestCase):
 class AgentInputStateTests(unittest.TestCase):
     def setUp(self):
         self.image = Image.new("RGB", (100, 80), "white")
+        # These existing state-machine tests assume a focused field. Real
+        # focus gating and zero-key failure paths have dedicated tests.
+        focus = patch.object(RPAgent, "_confirm_login_input_focus", return_value=True)
+        focus.start()
+        self.addCleanup(focus.stop)
 
     def test_input_requires_visual_verification_before_click(self):
         agent = make_agent()
