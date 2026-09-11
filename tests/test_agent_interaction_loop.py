@@ -434,7 +434,7 @@ class AgentInteractionLoopTests(unittest.TestCase):
             "passed": True,
             "target_visible": True,
             "marker_inside_target": True,
-            "target_bbox": [0.45, 0.40, 0.65, 0.65],
+            "target_bbox": [0.80, 0.40, 0.98, 0.65],
             "suggested_x": None,
             "suggested_y": None,
             "evidence": ["红点位于周昊右侧白色门框/向右箭头按钮内"],
@@ -557,11 +557,11 @@ class AgentInteractionLoopTests(unittest.TestCase):
         self.assertIn("渠道管理 → 体验中心 → 系统配置", calls[0][0])
         self.assertIn("局部放大图", calls[1][0])
         self.assertGreater(calls[1][1][0], 500)
-        self.assertIsNone(result["target_bbox"])
+        self.assertIsNotNone(result["target_bbox"])
         self.assertTrue(result["local_zoom_confirmed"])
         self.assertIn("局部放大复核", result["reason"])
 
-    def test_option_local_zoom_semantic_hit_ignores_stale_bbox_coordinates(self):
+    def test_option_local_zoom_semantic_hit_cannot_override_conflicting_geometry(self):
         frame = Image.new("RGB", (1280, 800), "white")
         agent = make_agent([])
         action = {
@@ -597,13 +597,55 @@ class AgentInteractionLoopTests(unittest.TestCase):
         ):
             result = agent._verify_query_pointer_target(frame, action)
 
-        self.assertTrue(result["passed"])
-        self.assertTrue(result["marker_inside_target"])
-        self.assertTrue(result["local_zoom_confirmed"])
-        self.assertIsNone(result["target_bbox"])
-        self.assertIsNone(result["suggested_x"])
-        self.assertIsNone(result["suggested_y"])
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["marker_inside_target"])
+        self.assertFalse(result["local_zoom_confirmed"])
+        self.assertIsNotNone(result["target_bbox"])
+        self.assertIsNotNone(result["suggested_x"])
+        self.assertIsNotNone(result["suggested_y"])
         self.assertIn("局部放大复核", result["reason"])
+
+    def test_local_verifier_missing_geometry_cannot_claim_success(self):
+        agent = make_agent([])
+        result = {"passed": True, "target_visible": True,
+                  "marker_inside_target": True, "target_bbox": None,
+                  "evidence": ["声称红点命中"], "suggested_x": None, "suggested_y": None}
+        with patch.object(rpa_agent, "chat_vision", return_value=json.dumps(result)):
+            checked = agent._verify_query_pointer_target(Image.new("RGB", (1280, 800)), {
+                "action": "click", "params": {"x": .65, "y": .46, "target": "智能问数"}})
+        self.assertFalse(checked["passed"])
+        self.assertFalse(checked["local_zoom_confirmed"])
+
+    def test_blind_local_pixel_box_is_mapped_without_proposed_marker(self):
+        agent = make_agent([])
+        full = {"passed": False, "target_visible": False, "evidence": []}
+        calls = []
+        def locate(prompt, image, **kwargs):
+            calls.append((prompt, image, kwargs))
+            if len(calls) == 1:
+                return json.dumps(full)
+            width, height = image.size
+            # Screenshot is entirely white: the local locator must see no marker.
+            self.assertEqual(image.getextrema(), ((255, 255),) * 3)
+            self.assertNotIn("红色十字中心", prompt)
+            return json.dumps({"target_visible": True,
+                "bbox_pixels": [width*.4, height*.4, width*.6, height*.6],
+                "evidence": ["独立定位目标文字行"], "reason": "文字清晰"})
+        with patch.object(rpa_agent, "chat_vision", side_effect=locate):
+            checked = agent._verify_query_pointer_target(Image.new("RGB", (1280, 800), "white"), {
+                "action": "click", "params": {"x": .65, "y": .46, "target": "智能问数"}})
+        self.assertTrue(checked["passed"])
+        self.assertTrue(checked["geometry_inside_target"])
+        self.assertTrue(checked["local_zoom_confirmed"])
+
+    def test_blind_local_pixel_box_outside_image_is_rejected(self):
+        agent = make_agent([])
+        response = {"target_visible": True, "bbox_pixels": [0, 0, 9999, 9999],
+                    "evidence": ["无效尺寸"], "passed": True, "marker_inside_target": True}
+        with patch.object(rpa_agent, "chat_vision", return_value=json.dumps(response)):
+            checked = agent._verify_query_pointer_target(Image.new("RGB", (1280, 800)), {
+                "action": "click", "params": {"x": .65, "y": .46, "target": "智能问数"}})
+        self.assertFalse(checked["passed"])
 
     def test_pointer_verifier_uses_bbox_center_when_marker_is_outside(self):
         frame = Image.new("RGB", (100, 80), "white")

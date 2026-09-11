@@ -15,6 +15,7 @@ from llm_client import chat_vision, chat_text, token_tracker
 from vnc_client import VNCClient
 from knowledge_loader import get_summary
 from prompt_context import history_for_prompt, login_for_prompt, direct_url_verification, use_business_knowledge, pointer_relocation
+from prompt_context import query_system_prompt, lean_query_enabled, direct_stage_check
 from interaction_guard import (
     InteractionGuard,
     InteractionGuardError,
@@ -608,24 +609,22 @@ class RPAgent:
             top = max(0, py - radius_y)
             right = min(marked.width, px + radius_x + 1)
             bottom = min(marked.height, py + radius_y + 1)
-            local = marked.crop((left, top, right, bottom))
+            # Blind localization: no proposed marker or full-frame coordinates
+            # are shown to this reader, avoiding confirmation/frame bias.
+            local = screenshot.convert("RGB").crop((left, top, right, bottom))
             scale = max(2, min(4, round(900 / max(local.size))))
             zoomed = local.resize(
                 (local.width * scale, local.height * scale),
                 Image.Resampling.LANCZOS,
             )
-            local_marker_x = (px - left) * scale
-            local_marker_y = (py - top) * scale
             local_prompt = (
                 f"拟执行动作：{action_data.get('action', '')}\n"
                 f"声明目标：{target}\n"
                 f"当前固定计划步骤：{current.get('content', '登录前阶段')}\n"
-                f"这是原图区域 x={left}..{right - 1}, y={top}..{bottom - 1} "
-                f"的 {scale} 倍局部放大图，当前图尺寸 {zoomed.width}×{zoomed.height}；"
-                f"红色十字中心在当前图像素 ({local_marker_x}, {local_marker_y})。\n"
-                "只按当前局部放大图读取目标文字与红点所在行。target_bbox 和 "
-                "suggested_x/y 必须按当前局部图以 x/(width-1)、y/(height-1) "
-                "归一化；不得沿用原图的像素或归一化坐标，也不得相信 target 声明本身。"
+                f"这是未标记的局部放大图，宽 {zoomed.width} 像素，高 {zoomed.height} 像素。\n"
+                "只定位图中目标的紧致可交互边界；坐标原点是本图左上角。"
+                "返回 bbox_pixels=[左,上,右,下]，全部是本图像素，不能使用归一化值、"
+                "原始桌面尺寸或假定的画布高度。具体选项不能包含上下相邻行。"
             )
             if any(word in normalized_target for word in ("密码", "用户名", "账号", "输入框")):
                 local_prompt += (
@@ -650,7 +649,13 @@ class RPAgent:
                 local_response = chat_vision(
                     local_prompt,
                     zoomed,
-                    system_prompt=QUERY_POINTER_VERIFIER_PROMPT,
+                    system_prompt=(
+                        "你是独立视觉定位器，只识读当前图片，不执行操作、不猜测鼠标位置。"
+                        "严格返回JSON：{\"target_visible\":true或false,"
+                        "\"bbox_pixels\":[左,上,右,下]或null,"
+                        "\"evidence\":[\"目标文字及相邻可见锚点\"],\"reason\":\"理由\"}。"
+                        "边界必须来自本图，无法确认返回null。"
+                    ),
                     temperature=0.0,
                     image_format="PNG",
                 )
@@ -658,6 +663,17 @@ class RPAgent:
             except Exception:
                 local_parsed = None
             if isinstance(local_parsed, dict) and local_parsed.get("target_visible") is True:
+                if "bbox_pixels" in local_parsed:
+                    box = local_parsed.get("bbox_pixels")
+                    valid = (isinstance(box, list) and len(box) == 4
+                        and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box)
+                        and 0 <= box[0] < box[2] <= zoomed.width - 1
+                        and 0 <= box[1] < box[3] <= zoomed.height - 1)
+                    local_parsed["target_bbox"] = ([box[0] / (zoomed.width - 1),
+                        box[1] / (zoomed.height - 1), box[2] / (zoomed.width - 1),
+                        box[3] / (zoomed.height - 1)] if valid else None)
+                    local_parsed["passed"] = bool(valid)
+                    local_parsed["marker_inside_target"] = bool(valid)
                 local_bbox = self._parse_normalized_target_bbox(
                     local_parsed.get("target_bbox")
                 )
@@ -679,23 +695,25 @@ class RPAgent:
                     and isinstance(local_evidence, list)
                     and any(str(item).strip() for item in local_evidence)
                 )
-                if local_semantic_pass:
-                    # The enlarged crop is the independent second semantic
-                    # check. Some vision models still emit bbox numbers in the
-                    # old full-frame coordinate system despite the prompt; do
-                    # not let those numbers negate an explicit, evidenced hit.
-                    local_parsed["target_bbox"] = None
-                    local_parsed["suggested_x"] = None
-                    local_parsed["suggested_y"] = None
-                    local_zoom_confirmed = True
-                elif local_bbox is not None:
+                # A prose claim must never erase contradictory geometry.
+                # Missing/unreliable local coordinates require a new observation,
+                # not permission to click an adjacent row.
+                if local_bbox is not None:
                     local_parsed["target_bbox"] = [
                         to_full_x(local_bbox[0]),
                         to_full_y(local_bbox[1]),
                         to_full_x(local_bbox[2]),
                         to_full_y(local_bbox[3]),
                     ]
-                if not local_semantic_pass:
+                    mapped = local_parsed["target_bbox"]
+                    local_zoom_confirmed = bool(local_semantic_pass
+                        and mapped[0] <= x_norm <= mapped[2]
+                        and mapped[1] <= y_norm <= mapped[3])
+                else:
+                    local_parsed["passed"] = False
+                    local_parsed["marker_inside_target"] = False
+                    local_parsed["target_bbox"] = None
+                if not local_zoom_confirmed:
                     try:
                         local_sx, local_sy = validate_normalized_coordinates({
                             "x": local_parsed.get("suggested_x"),
@@ -2959,7 +2977,7 @@ class RPAgent:
 【本步原始截图坐标系】宽 {screenshot.width} 像素，高 {screenshot.height} 像素，包含浏览器标题栏以及截图中可见的桌面区域。归一化坐标必须按 x=目标中心像素x/{max(1, screenshot.width - 1)}、y=目标中心像素y/{max(1, screenshot.height - 1)} 计算，不得套用 1024、960 等假定高度。
         {knowledge_block}{policy_block}{subtask_block}{pending_input_block}{guidance_block}
 之前的操作历史：
-{history_for_prompt(self.history)}
+{history_for_prompt(self.history, lean=lean_query_enabled(policy is not None and policy.active))}
 
 请输出下一步操作的 JSON。"""
 
@@ -2987,7 +3005,7 @@ class RPAgent:
                 "不得重复被拦截的相同动作或改名绕过。输出一个正常动作JSON，thought中说明"
                 "原路径为什么卡住、新路径及本次选择；仅执行新路径的第一步，后续再看截图。",
                 screenshot,
-                system_prompt=getattr(self, "system_prompt", SYSTEM_PROMPT),
+                system_prompt=getattr(self, "_decision_system_prompt", getattr(self, "system_prompt", SYSTEM_PROMPT)),
                 temperature=0.0, image_format="PNG",
             )
             action_data = self._parse_action(response)
@@ -2997,6 +3015,8 @@ class RPAgent:
             action_data = direct_url_verification(pending)
         if action_data is None:
             action_data = pointer_relocation(self.history, plan)
+        if action_data is None and getattr(self, "_direct_stage_checks", False):
+            action_data = direct_stage_check(self.history, plan, self.login_progress)
         if (
             pending.get("verified") is not True
             and pending.get("verification_attempted") is True
@@ -3044,7 +3064,7 @@ class RPAgent:
             response = chat_vision(
                 prompt + hint,
                 screenshot,
-                system_prompt=getattr(self, "system_prompt", SYSTEM_PROMPT),
+                system_prompt=getattr(self, "_decision_system_prompt", getattr(self, "system_prompt", SYSTEM_PROMPT)),
                 **vision_options,
             )
             candidate = self._parse_action(response)
@@ -3429,6 +3449,12 @@ class RPAgent:
         # 加载知识摘要：按任务文本匹配页面知识，注入后续每步 prompt
         self.knowledge_summary = get_summary(task)
         self._start_at_login_entry = self.task_policy.active
+        self._direct_stage_checks = lean_query_enabled(self.task_policy.active)
+        self._decision_system_prompt = query_system_prompt(
+            getattr(self, "system_prompt", SYSTEM_PROMPT),
+            _OS_SHORTCUT_HINTS.get({"win": "windows"}.get(self.system, self.system), OS_SHORTCUT_HINT),
+            self.task_policy.active,
+        )
         business_summary = get_summary(task, phase="business")
         self._business_knowledge_block = f"\n{business_summary}\n" if business_summary else ""
         if self.knowledge_summary:

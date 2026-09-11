@@ -11,6 +11,42 @@ from task_policy import QueryOnlyPolicy
 
 
 class StartIMERecoveryTests(unittest.TestCase):
+    def test_direct_stage_probe_cannot_complete_after_independent_failure(self):
+        frame = input_helpers.ApplicationLaunchRecoveryTests._start_search_image(candidate_panel=False)
+        agent = make_agent([frame])
+        agent.task_policy = QueryOnlyPolicy.for_task("查询智能问数和新SQL生成")
+        agent.task_plan = agent.task_policy.build_plan("查询智能问数和新SQL生成")
+        agent.current_plan_idx = 0
+        plan = agent.task_plan[0]
+        agent._direct_stage_checks = True
+        agent.history = [{"action": "click", "executed": True, "params": {"target": "智能体能力", "x": .1, "y": .2},
+                          "subtask": {"content": plan["content"]}}]
+        with patch("rpa_agent.chat_vision") as decision, \
+             patch.object(agent, "_verify_visible_state", return_value={"passed": False, "reason": "only parent menu opened"}) as gate, \
+             patch.object(agent, "saveScreenShot", side_effect=virtual_screenshot_path), patch("rpa_agent.time.sleep"):
+            agent._decision_step("查询智能问数和新SQL生成", "", plan)
+        decision.assert_not_called()
+        gate.assert_called_once()
+        self.assertFalse(agent.history[-1]["executed"])
+        self.assertIsNone(agent._subtask_result)
+        self.assertFalse(plan["completed"])
+        self.assertEqual(agent.vnc.events, [])
+
+    def test_direct_planning_does_not_skip_login_entry_evidence(self):
+        frame = input_helpers.ApplicationLaunchRecoveryTests._start_search_image(candidate_panel=False)
+        agent = make_agent([frame])
+        agent.task_policy = QueryOnlyPolicy.for_task("查询智能问数和新SQL生成")
+        agent._direct_stage_checks = True
+        agent.login_progress = "submitted"
+        agent.history = [{"action": "skill_open_webpage", "executed": True, "params": {"stage": "submit"}}]
+        with patch("rpa_agent.chat_vision") as decision, \
+             patch.object(agent, "saveScreenShot", side_effect=virtual_screenshot_path), patch("rpa_agent.time.sleep"):
+            result = agent._decision_step("查询智能问数和新SQL生成", "", None)
+        decision.assert_not_called()
+        self.assertEqual(result, "failed")
+        self.assertEqual(agent.task_plan, [])
+        self.assertEqual(agent.vnc.events, [])
+
     def test_relocated_pointer_still_cannot_bypass_independent_gate(self):
         frame = input_helpers.ApplicationLaunchRecoveryTests._start_search_image(candidate_panel=False)
         agent = make_agent([frame, frame])

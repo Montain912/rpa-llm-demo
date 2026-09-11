@@ -604,7 +604,7 @@ class QueryOnlyPolicy:
         plan = [
             {
                 "content": "确认已从指定登录页登录，并进入体验中心的智能体能力页面",
-                "expected_result": "页面标题或导航锚点明确显示体验中心和智能体能力",
+                "expected_result": "主内容区域当前激活的标签或页面标题明确为智能体能力，且主内容区可见测试类型筛选控件和结果区域；仅展开侧边栏看到菜单文字不算进入目标页，首页仪表盘仍显示时不得通过。",
                 "completed": False,
             },
             {
@@ -619,19 +619,19 @@ class QueryOnlyPolicy:
             },
             {
                 "content": "两个测试类型均验收后，只点击一次搜索并等待结果稳定",
-                "expected_result": "两个筛选值仍保留，且结果表格、分页或明确空结果状态完成加载",
+                "expected_result": "两个筛选值仍保留，结果列表/卡片/表格、分页或明确空结果完成加载。结果区域的总数明确显示0（例如‘模型 0个’）且无加载中或错误提示，也属于明确空结果，不要求空表格或分页同时出现；只有空白但没有总数/空结果文字不算通过。",
                 "completed": False,
             },
         ]
         if _extract_scene_name(task):
             plan.append({
                 "content": "按用户明确给出的测试场景名称填写查询条件并搜索",
-                "expected_result": "输入值与用户给定名称逐字符一致，并出现查询结果或明确空结果状态",
+                "expected_result": "输入值与用户给定名称逐字符一致，并出现查询结果或明确空结果状态；结果区域总数明确为0且无加载中或错误提示可以表示空结果，但仅有空白不能通过。",
                 "completed": False,
             })
         plan.append({
             "content": "点击绿色顶部栏最右侧的无文字退出登录图标，并验证重新出现指定登录页",
-            "expected_result": "页面重新显示登录表单，且地址属于指定 login.html 入口",
+            "expected_result": "退出登录成功，页面重新显示登录表单，且地址属于指定 login.html 入口",
             "completed": False,
         })
         return plan
