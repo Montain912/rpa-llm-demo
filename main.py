@@ -1,7 +1,7 @@
 """
 FastAPI 后端 - RPA+LLM Demo
 提供 REST API 与 WebSocket 推送（替代 Flask + 前端轮询）
-启动：uvicorn main:app --host 0.0.0.0 --port 5000
+启动：python main.py（默认 5010）；或 uvicorn main:app --host 0.0.0.0 --port 5010
 """
 import os
 import io
@@ -70,9 +70,9 @@ VNC_CONFIG = {
     "system": "win"
 }
 
-# noVNC websockify 代理端口（与 FastAPI 5000 分离，避免与主服务 socket 冲突）
-# 注：8443 常被 Docker 占用，改用 noVNC 官方示例默认端口 6080
-WS_PORT = 6080
+# 与用户正在使用的 5000/6080 服务隔离，可按环境覆盖。
+HTTP_PORT = int(os.environ.get("RPA_HTTP_PORT", "5010"))
+WS_PORT = int(os.environ.get("RPA_WS_PORT", "6081"))
 
 state_lock = threading.Lock()
 
@@ -516,10 +516,10 @@ def novnc_info():
 
 if __name__ == "__main__":
     import uvicorn
-    # 先启动 websockify 代理（noVNC 前端通过 WS:8443 连接远程桌面）
+    # 先启动独立 websockify 代理，前端从 /api/novnc-info 获取端口。
     _get_websockify()
     try:
-        uvicorn.run(app, host="0.0.0.0", port=5000)
+        uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT)
     finally:
         # 主进程退出时关闭 websockify 子进程
         if _websockify is not None:

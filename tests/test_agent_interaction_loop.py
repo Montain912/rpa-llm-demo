@@ -647,6 +647,27 @@ class AgentInteractionLoopTests(unittest.TestCase):
                 "action": "click", "params": {"x": .65, "y": .46, "target": "智能问数"}})
         self.assertFalse(checked["passed"])
 
+    def test_corrected_pointer_reuses_crop_not_verdict(self):
+        agent = make_agent([])
+        frame = Image.new("RGB", (1280, 800), "white")
+        local_images = []
+        def locate(prompt, image, **kwargs):
+            if "独立视觉定位器" not in kwargs.get("system_prompt", ""):
+                return json.dumps({"passed": False, "target_visible": False})
+            local_images.append(image.tobytes())
+            return json.dumps({"target_visible": True,
+                "bbox_pixels": [390, 230, 470, 250], "evidence": ["新SQL生成文字行"]})
+        with patch.object(rpa_agent, "chat_vision", side_effect=locate):
+            first = agent._verify_query_pointer_target(frame, {
+                "action": "click", "params": {"x": .644, "y": .443, "target": "新SQL生成"}})
+            self.assertFalse(first["passed"])
+            second = agent._verify_query_pointer_target(frame.copy(), {
+                "action": "click", "params": {"x": first["suggested_x"],
+                "y": first["suggested_y"], "target": "新SQL生成"}})
+        self.assertTrue(second["passed"])
+        self.assertEqual(len(local_images), 2)  # Both attempts independently verified.
+        self.assertEqual(local_images[0], local_images[1])
+
     def test_pointer_verifier_uses_bbox_center_when_marker_is_outside(self):
         frame = Image.new("RGB", (100, 80), "white")
         agent = make_agent([])

@@ -292,4 +292,4 @@ def test_connection():
 if __name__ == "__main__":
     # 确保 templates 目录存在
     os.makedirs("templates", exist_ok=True)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("RPA_HTTP_PORT", "5010")), debug=True)

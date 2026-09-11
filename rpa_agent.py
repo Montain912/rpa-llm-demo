@@ -16,6 +16,7 @@ from vnc_client import VNCClient
 from knowledge_loader import get_summary
 from prompt_context import history_for_prompt, login_for_prompt, direct_url_verification, use_business_knowledge, pointer_relocation
 from prompt_context import query_system_prompt, lean_query_enabled, direct_stage_check
+from pointer_context import stable_pointer_crop
 from interaction_guard import (
     InteractionGuard,
     InteractionGuardError,
@@ -603,12 +604,10 @@ class RPAgent:
                 )
             )
         ):
-            radius_x = max(140, round(marked.width * 0.16))
-            radius_y = max(100, round(marked.height * 0.14))
-            left = max(0, px - radius_x)
-            top = max(0, py - radius_y)
-            right = min(marked.width, px + radius_x + 1)
-            bottom = min(marked.height, py + radius_y + 1)
+            bounds, self._pointer_crop_context = stable_pointer_crop(
+                screenshot, target, px, py, getattr(self, "_pointer_crop_context", None)
+            )
+            left, top, right, bottom = bounds
             # Blind localization: no proposed marker or full-frame coordinates
             # are shown to this reader, avoiding confirmation/frame bias.
             local = screenshot.convert("RGB").crop((left, top, right, bottom))
@@ -629,8 +628,8 @@ class RPAgent:
             if any(word in normalized_target for word in ("密码", "用户名", "账号", "输入框")):
                 local_prompt += (
                     "\n输入框有时只有底部横线。可交互行应围绕占位文字/已输入文字和对应图标，"
-                    "不要把上一行底线与本行文字之间的留白算入控件。红点必须贴近文字行的"
-                    "垂直中心，不能在两行之间。若未命中，suggested_x/y 返回本行文字区域中心。"
+                    "不要把上一行底线与本行文字之间的留白算入控件。"
+                    "边界应贴近本行文字的垂直中心，不能在两行之间。"
                 )
             if "体验中心" in normalized_target:
                 local_prompt += (
