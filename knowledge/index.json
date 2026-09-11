@@ -4,13 +4,15 @@
         "description": "所有GUI字段输入的验收、纠错和输入法操作规则",
         "filePath": "./text_input.json",
         "parentPage": "",
-        "always": true
+        "always": true,
+        "promptPhases": ["startup", "input", "recovery"]
     },
     {
         "name": "浏览器导航与网址输入",
         "description": "浏览器窗口、地址栏输入和网址导航故障诊断",
         "filePath": "./browser_navigation.json",
         "parentPage": "浏览器",
+        "promptPhases": ["startup", "input", "recovery"],
         "keywords": ["浏览器", "网址", "网页", "http://", "https://", "Edge", "Chrome"]
     },
     {

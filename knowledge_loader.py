@@ -547,7 +547,7 @@ def _get_entry_summary(entry: dict) -> str:
     return summary
 
 
-def get_summary(task: str) -> str:
+def get_summary(task: str, phase: str | None = None) -> str:
     """组合所有 always 知识与任务命中的最具体知识摘要。"""
     entries = load_index()
     selected = [entry for entry in entries if entry.get("always") is True]
@@ -556,6 +556,9 @@ def get_summary(task: str) -> str:
     unique = []
     seen_paths: set[str] = set()
     for entry in selected:
+        phases = entry.get("promptPhases")
+        if phase and isinstance(phases, list) and phases and phase not in phases:
+            continue
         path = str(entry.get("filePath", ""))
         if not path or path in seen_paths:
             continue

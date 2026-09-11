@@ -7,6 +7,7 @@ import io
 import json
 import os
 import time
+import sys
 from pathlib import Path
 from openai import OpenAI
 from PIL import Image
@@ -133,6 +134,7 @@ def chat_text(prompt: str, system_prompt: str = "你是一个有帮助的助手�
     """
     调用文本模型
     """
+    started = time.perf_counter()
     response = client.chat.completions.create(
         model=TEXT_MODEL,
         messages=[
@@ -142,7 +144,11 @@ def chat_text(prompt: str, system_prompt: str = "你是一个有帮助的助手�
         temperature=temperature,
         max_tokens=4096
     )
-    token_tracker.record("text", TEXT_MODEL, response.usage)
+    token_tracker.record("text", TEXT_MODEL, response.usage, {
+        "purpose": sys._getframe(1).f_code.co_name,
+        "api_seconds": round(time.perf_counter() - started, 3),
+        "text_chars": len(prompt) + len(system_prompt),
+    })
     return response.choices[0].message.content
 
 
@@ -169,6 +175,7 @@ def chat_vision(
     image.save(LLM_OUTPUT_DIR / f"screenshot_{r}.png")
     
     
+    started = time.perf_counter()
     response = client.chat.completions.create(
         model=VISION_MODEL,
         messages=[
@@ -191,7 +198,13 @@ def chat_vision(
         temperature=temperature,
         max_tokens=max_tokens
     )
-    token_tracker.record("vision", VISION_MODEL, response.usage)
+    token_tracker.record("vision", VISION_MODEL, response.usage, {
+        "purpose": sys._getframe(1).f_code.co_name,
+        "api_seconds": round(time.perf_counter() - started, 3),
+        "text_chars": len(prompt) + len(system_prompt),
+        "image_size": list(img.size),
+        "image_format": normalized_format,
+    })
     # print(response.choices[0].message)
     with open(LLM_OUTPUT_DIR / f"vision_response_{r}.txt", "w", encoding="utf-8") as f:
         f.write(response.choices[0].message.content)

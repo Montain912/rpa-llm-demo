@@ -14,6 +14,7 @@ from PIL import Image, ImageDraw
 from llm_client import chat_vision, chat_text, token_tracker
 from vnc_client import VNCClient
 from knowledge_loader import get_summary
+from prompt_context import history_for_prompt, login_for_prompt, direct_url_verification, use_business_knowledge, pointer_relocation
 from interaction_guard import (
     InteractionGuard,
     InteractionGuardError,
@@ -169,11 +170,11 @@ SYSTEM_PROMPT = """你是一个 GUI 自动化智能体（Computer Use Agent）�
 - 若当前浏览器已经显示任务指定页面，直接在该窗口继续；只有浏览器未打开或页面无关时才打开新窗口
 - 重要：截图中可能出现 IDE 编辑器、浏览器控制台、命令行终端等开发工具界面，请完全忽略它们，寻找远程桌面的正常桌面环境（如桌面图标、任务栏、开始菜单等）。如果看到系统网页端界面，说明窗口未最小化，应先最小化或关闭该窗口。
 
-- 【下拉列表交互规则，极其重要】遇到下拉选择框（select/dropdown），优先使用键盘而不是鼠标逐个点：
+- 【下拉列表交互规则】遇到下拉选择框（select/dropdown）：
   - 先用鼠标点击下拉框头部展开列表
-  - 展开后**不要逐个点列表项**（视觉坐标估算误差会反复摇摆），改用键盘：
-    · 输入选项文字的前几个字（如"云南"），系统通常会自动匹配；或
-    · 用上下方向键 ↑↓ 定位到目标项，然后按 Enter 确认
+  - 按当前任务策略使用可见选项定位；只有焦点和控件键盘行为明确且策略允许时，才用键盘导航，不要猜测通用下拉框支持输入匹配或 Enter。
+  - 多选框选中一个值后可能仍然展开，先核对已选标签/勾选，再操作另一个目标；不要重复切换已正确的选项。
+  - 需要关闭弹层时优先 press(escape)，随后观察弹层关闭且已选值保留；也可点击经过验收的原下拉框头部。不要点击业务卡片或不明确的“页面空白区域”。
   - 同一页面如果有多个下拉框，**必须先在大脑里区分每个下拉框的选项范围**，避免跨下拉框串项（例如："场景渠道"的选项和"标题模型"的选项不能混选）
   - 用鼠标点列表项时，严格执行前面"坐标规则"中的"正中心"要求——瞄准高亮行整条区域的正中心
 
@@ -588,7 +589,8 @@ class RPAgent:
         # no coordinate is executed directly from model prose.
         if isinstance(parsed, dict) and (
             any(word in normalized_target for word in (
-                "智能问数", "新sql生成", "新SQL生成", "体验中心", "智能体能力", "登录"
+                "智能问数", "新sql生成", "新SQL生成", "体验中心", "智能体能力", "登录",
+                "密码", "用户名", "账号", "输入框",
             ))
             or parsed.get("target_visible") is not True
             or (
@@ -625,6 +627,12 @@ class RPAgent:
                 "suggested_x/y 必须按当前局部图以 x/(width-1)、y/(height-1) "
                 "归一化；不得沿用原图的像素或归一化坐标，也不得相信 target 声明本身。"
             )
+            if any(word in normalized_target for word in ("密码", "用户名", "账号", "输入框")):
+                local_prompt += (
+                    "\n输入框有时只有底部横线。可交互行应围绕占位文字/已输入文字和对应图标，"
+                    "不要把上一行底线与本行文字之间的留白算入控件。红点必须贴近文字行的"
+                    "垂直中心，不能在两行之间。若未命中，suggested_x/y 返回本行文字区域中心。"
+                )
             if "体验中心" in normalized_target:
                 local_prompt += (
                     "\n逐行区分渠道管理、体验中心、系统配置；目标是中间的体验中心。"
@@ -1463,7 +1471,8 @@ class RPAgent:
             # model has repeatedly echoed the intended text instead of the UI.
             try:
                 transcription = self._parse_action(chat_vision(
-                    "仅抄录浏览器顶部地址栏当前实际显示的完整文字，不要抄录下方搜索建议。"
+                    "仅抄录浏览器地址栏（返回/刷新按钮右侧的长输入框）当前实际显示的完整文字。"
+                    "不要抄录最上方标签页的标题/截断网址，也不要抄录下方搜索建议。"
                     "保留中文、空格、全角标点和组合串，不要补全或修正为网址。"
                     "只返回 JSON: {\"observed_text\":\"实际文字\",\"readable\":true,"
                     "\"ime_visible\":false}。看不清则 readable=false；"
@@ -2900,8 +2909,16 @@ class RPAgent:
         # 2. 决策：调用视觉模型，坐标校验失败时带反馈重试一次
         self._last_state_verification = None
         guidance_block = f"\n{self._repeat_guidance}\n" if self._repeat_guidance else ""
+        if use_business_knowledge(plan, self.pending_input, self._repeat_guidance):
+            knowledge_block = getattr(self, "_business_knowledge_block", knowledge_block)
         policy = getattr(self, "task_policy", None)
         policy_block = f"\n{policy.prompt}\n" if policy is not None and policy.prompt else ""
+        if policy is not None and policy.active and not self.task_plan:
+            policy_block += login_for_prompt(
+                getattr(self, "login_progress", "idle"),
+                getattr(self, "_query_login_entry_verified", False),
+                policy.login_url,
+            )
         pending_input_block = ""
         if self.pending_input:
             pending = self.pending_input
@@ -2942,11 +2959,25 @@ class RPAgent:
 【本步原始截图坐标系】宽 {screenshot.width} 像素，高 {screenshot.height} 像素，包含浏览器标题栏以及截图中可见的桌面区域。归一化坐标必须按 x=目标中心像素x/{max(1, screenshot.width - 1)}、y=目标中心像素y/{max(1, screenshot.height - 1)} 计算，不得套用 1024、960 等假定高度。
         {knowledge_block}{policy_block}{subtask_block}{pending_input_block}{guidance_block}
 之前的操作历史：
-{json.dumps(self.history[-5:], ensure_ascii=False, indent=2) if self.history else '（无，这是第一步）'}
+{history_for_prompt(self.history)}
 
 请输出下一步操作的 JSON。"""
 
         action_data = None
+        if getattr(self, "_start_at_login_entry", False) and self.step == 1:
+            browser_check = self._verify_visible_state(
+                screenshot,
+                objective="确认浏览器已在前台，可以使用地址栏导航到本次登录入口",
+                expected_result="截图清楚显示浏览器窗口、标签栏和地址栏；没有开始菜单、系统对话框或其他应用遮挡地址栏。不能仅凭桌面浏览器图标判定通过。",
+            )
+            self._last_state_verification = browser_check
+            if browser_check["passed"]:
+                action_data = {
+                    "action": "skill_open_url",
+                    "params": {"url": policy.login_url},
+                    "thought": "已独立确认前台浏览器，先导航到本次登录入口，不复用上次残留的业务页面状态。",
+                    "source": "verified_login_entry_navigation",
+                }
         if getattr(self, "_loop_replan_requested", False):
             self._loop_replan_requested = False
             response = chat_vision(
@@ -2962,6 +2993,10 @@ class RPAgent:
             action_data = self._parse_action(response)
             action_data["source"] = "loop_replan"
         pending = self.pending_input or {}
+        if action_data is None:
+            action_data = direct_url_verification(pending)
+        if action_data is None:
+            action_data = pointer_relocation(self.history, plan)
         if (
             pending.get("verified") is not True
             and pending.get("verification_attempted") is True
@@ -3393,6 +3428,9 @@ class RPAgent:
 
         # 加载知识摘要：按任务文本匹配页面知识，注入后续每步 prompt
         self.knowledge_summary = get_summary(task)
+        self._start_at_login_entry = self.task_policy.active
+        business_summary = get_summary(task, phase="business")
+        self._business_knowledge_block = f"\n{business_summary}\n" if business_summary else ""
         if self.knowledge_summary:
             print(f"[知识] 匹配到页面知识，已注入决策上下文")
         knowledge_block = f"\n{self.knowledge_summary}\n" if self.knowledge_summary else ""

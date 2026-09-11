@@ -11,6 +11,52 @@ from task_policy import QueryOnlyPolicy
 
 
 class StartIMERecoveryTests(unittest.TestCase):
+    def test_relocated_pointer_still_cannot_bypass_independent_gate(self):
+        frame = input_helpers.ApplicationLaunchRecoveryTests._start_search_image(candidate_panel=False)
+        agent = make_agent([frame, frame])
+        agent.task_policy = QueryOnlyPolicy.for_task("查询智能问数和新SQL生成")
+        agent.history = [{"action": "click", "params": {"target": "体验中心", "x": .1, "y": .1},
+                          "executed": False, "pointer_target_verification": {
+                              "passed": False, "suggested_x": .2, "suggested_y": .3}}]
+        with patch("rpa_agent.chat_vision") as vision, \
+             patch.object(agent, "saveScreenShot", side_effect=virtual_screenshot_path), \
+             patch("rpa_agent.time.sleep"), \
+             patch.object(agent, "_verify_query_pointer_target", return_value={"passed": False, "reason": "still misses"}) as gate:
+            agent._decision_step("查询智能问数和新SQL生成", "", None)
+        vision.assert_not_called()
+        gate.assert_called_once()
+        self.assertFalse(agent.history[-1]["executed"])
+        self.assertEqual(agent.history[-1]["source"], "verified_pointer_relocation")
+        self.assertEqual(agent.vnc.events, [])
+
+    def test_entry_navigation_requires_visible_browser(self):
+        frame = input_helpers.ApplicationLaunchRecoveryTests._start_search_image(candidate_panel=False)
+        agent = make_agent([frame])
+        agent.task_policy = QueryOnlyPolicy.for_task("查询智能问数和新SQL生成")
+        agent._start_at_login_entry = True
+        with patch("rpa_agent.chat_vision", return_value=json.dumps({"action": "wait", "params": {"seconds": .5}})), \
+             patch.object(agent, "_verify_visible_state", return_value={"passed": False, "reason": "desktop"}), \
+             patch.object(agent, "saveScreenShot", side_effect=virtual_screenshot_path), patch("rpa_agent.time.sleep"):
+            agent._decision_step("查询智能问数和新SQL生成", "", None)
+        self.assertEqual(agent.history[-1]["action"], "wait")
+        self.assertEqual(agent.vnc.events, [])
+
+    def test_direct_url_verification_still_requires_independent_actual_text(self):
+        frame = input_helpers.ApplicationLaunchRecoveryTests._start_search_image(candidate_panel=False)
+        for actual, passed in (("http://example.com", True), ("http;//example.com", False)):
+            agent = make_agent([frame])
+            agent.pending_input = {"field_type": "url", "source_skill": "skill_open_url",
+                                   "text": "http://example.com", "verified": False}
+            with patch("rpa_agent.chat_vision", return_value=json.dumps({
+                "observed_text": actual, "readable": True, "ime_visible": False,
+            })) as vision, patch.object(agent, "saveScreenShot", side_effect=virtual_screenshot_path), \
+                 patch("rpa_agent.time.sleep"), patch.object(agent, "_has_windows_ime_candidate_panel", return_value=False):
+                agent._decision_step("open URL", "", None)
+            self.assertEqual(vision.call_count, 1)
+            self.assertEqual(agent.pending_input["verified"], passed)
+            self.assertEqual(agent.history[-1]["source"], "direct_url_verification")
+            self.assertEqual(agent.vnc.events, [])
+
     def test_repeated_loop_requests_replan_before_stopping(self):
         agent = self.make_agent()
         agent.pending_input = None

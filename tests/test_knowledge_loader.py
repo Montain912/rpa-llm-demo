@@ -30,6 +30,18 @@ FULL_QUERY_TASK = (
 
 
 class KnowledgeMatchingTests(unittest.TestCase):
+    def test_phase_filter_keeps_business_and_restores_input_guidance(self):
+        entries = [
+            {"filePath": "input", "always": True, "promptPhases": ["input", "recovery"]},
+            {"filePath": "business", "always": True},
+        ]
+        with patch.object(knowledge_loader, "load_index", return_value=entries), \
+             patch.object(knowledge_loader, "match_entries_by_task", return_value=[]), \
+             patch.object(knowledge_loader, "_get_entry_summary", side_effect=lambda entry: entry["filePath"]):
+            self.assertEqual(knowledge_loader.get_summary("task", phase="business"), "business")
+            self.assertIn("input", knowledge_loader.get_summary("task", phase="recovery"))
+            self.assertIn("input", knowledge_loader.get_summary("task"))
+
     def tearDown(self):
         # 只清理进程内缓存；测试不得删除或改写仓库中的生成缓存文件。
         knowledge_loader._memory_cache.clear()

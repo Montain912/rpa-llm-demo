@@ -56,6 +56,11 @@ class LLMClientImageTransportTests(unittest.TestCase):
         self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
         decoded = Image.open(io.BytesIO(raw)).convert("RGB")
         self.assertEqual(list(decoded.getdata()), list(source.getdata()))
+        record = module.token_tracker.records[-1]
+        self.assertEqual(record["purpose"], "test_png_mode_uses_lossless_payload_and_matching_mime_type")
+        self.assertEqual(record["image_size"], [3, 2])
+        self.assertGreaterEqual(record["api_seconds"], 0)
+        self.assertGreater(record["text_chars"], 0)
 
 
 if __name__ == "__main__":
