@@ -4,3 +4,7 @@ openai==1.12.0
 vncdotool==1.2.0
 Pillow==10.2.0
 python-dotenv==1.0.0
+fastapi==0.110.0
+uvicorn==0.27.1
+pydantic>=2.6,<3
+websockify==0.11.0
