@@ -407,6 +407,7 @@
             </div>
             <div class="desktop-view" id="desktopView">
                 <div id="vncCanvas" style="display:none;"></div>
+                <img id="screenshotFallback" alt="远程桌面截图（非实时连接）" style="display:none;">
                 <div id="vncPlaceholder" class="desktop-placeholder">
                     <p>🖥️ 点击"连接桌面"开始远程操作</p>
                     <p style="font-size: 12px; margin-top: 8px;">将启动 websockify 代理，浏览器经 WebSocket 直连 VNC Server</p>
@@ -457,12 +458,12 @@
                 <input type="text" id="vncHost" value="localhost">
             </div>
             <div class="form-group">
-                <label>端口</label>
-                <input type="number" id="vncPort" value="5901">
+                <label>VNC 服务端口（不是前端或桌面代理端口）</label>
+                <input type="number" id="vncPort" value="5901" min="1" max="65535" step="1">
             </div>
             <div class="form-group">
                 <label>密码</label>
-                <input type="password" id="vncPassword" value="123456">
+                <input type="password" id="vncPassword" placeholder="留空保持当前密码">
             </div>
             <div class="settings-actions">
                 <button class="btn-cancel" onclick="toggleSettings()">取消</button>
@@ -480,14 +481,13 @@
         // noVNC 相关状态
         let rfb = null;                  // RFB 实例
         let RFBConstructor = null;       // RFB 类（动态 import 后填充）
-        let novncPort = 6080;             // websockify 代理端口（与后端 WS_PORT 一致）
+        let novncPort = null;             // 每次连接前从后端获取，不猜测或复用旧端口
         let vncUser = '';                // VNC 用户名（从 /api/novnc-info 获取）
         let vncPassword = '';            // 用户在设置面板填写的密码
 
         // 初始化
         document.addEventListener('DOMContentLoaded', () => {
             loadSettings();
-            loadNovncInfo();
             connectStatusWS();
         });
 
@@ -577,7 +577,7 @@
             if (step.step <= lastStep) return;
             const actionText = formatAction(step.action, step.params);
             addMessage('agent',
-                `<div>步骤 ${step.step}: ${step.thought}</div>
+                `<div>步骤 ${step.step}: ${step.executed === false ? '【未完成】' : ''}${step.thought}</div>
                  <div class="step-action">${actionText}</div>`,
                 step
             );
@@ -759,25 +759,31 @@
 
         // 刷新截图
         function refreshScreenshot() {
-            fetch('/api/screenshot')
+            if (rfb) return;
+            return fetch('/api/screenshot')
                 .then(res => res.json())
                 .then(data => {
-                    const view = document.getElementById('desktopView');
+                    // 截图仅更新备用图片，不能删除 noVNC 的目标容器。
+                    // 请求返回时可能已经建立实时连接，不能再覆盖它。
+                    if (rfb) return;
+                    const screenshot = document.getElementById('screenshotFallback');
+                    const placeholder = document.getElementById('vncPlaceholder');
                     if (data.success) {
-                        view.innerHTML = `<img src="${data.screenshot}" alt="远程桌面">`;
+                        screenshot.src = data.screenshot;
+                        screenshot.style.display = 'block';
+                        placeholder.style.display = 'none';
                     } else {
-                        view.innerHTML = `<div class="desktop-placeholder" style="color: #ff6b6b;">
-                            <p>❌ 获取截图失败</p>
-                            <p style="font-size: 12px; margin-top: 8px;">${data.error}</p>
-                        </div>`;
+                        screenshot.style.display = 'none';
+                        placeholder.textContent = '❌ 获取截图失败: ' + data.error;
+                        placeholder.style.display = 'block';
                     }
                 })
                 .catch(err => {
-                    document.getElementById('desktopView').innerHTML = 
-                        `<div class="desktop-placeholder" style="color: #ff6b6b;">
-                            <p>❌ 网络错误</p>
-                            <p style="font-size: 12px; margin-top: 8px;">${err.message}</p>
-                        </div>`;
+                    if (rfb) return;
+                    document.getElementById('screenshotFallback').style.display = 'none';
+                    const placeholder = document.getElementById('vncPlaceholder');
+                    placeholder.textContent = '❌ 网络错误: ' + err.message;
+                    placeholder.style.display = 'block';
                 });
         }
 
@@ -796,44 +802,44 @@
                 });
         }
 
-        function saveSettings() {
-            const host = document.getElementById('vncHost').value;
-            const port = document.getElementById('vncPort').value;
+        async function saveSettings() {
+            const host = document.getElementById('vncHost').value.trim();
+            const port = Number(document.getElementById('vncPort').value);
             const password = document.getElementById('vncPassword').value;
-
-            fetch('/api/test-connection', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ host, port, password })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    // 连接成功，保存配置；后端会自动重启 websockify 代理
-                    fetch('/api/vnc-config', {
+            if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+                alert('请输入主机地址和 1–65535 之间的整数端口');
+                return;
+            }
+            const config = { host, port };
+            // 密码留空时，测试和保存都使用后端现有密码，不能测试后再清空。
+            if (password !== '') config.password = password;
+            const saveBtn = document.querySelector('#settingsModal .btn-primary');
+            saveBtn.disabled = true;
+            try {
+                async function postConfig(url) {
+                    const response = await fetch(url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ host, port, password })
-                    }).then(() => {
-                        vncPassword = password;
-                        // 若 noVNC 已连接，配置变更后需断开重连
-                        if (rfb) {
-                            disconnectVNC();
-                            addMessage('system', '⚠️ VNC 配置已变更，请重新连接桌面');
-                        }
-                        // 重新拉取端口信息（可能未来支持动态端口）
-                        loadNovncInfo();
+                        body: JSON.stringify(config)
                     });
-                    alert('✅ 连接成功！分辨率: ' + data.resolution);
-                    toggleSettings();
-                    if (!rfb) refreshScreenshot();
-                } else {
-                    alert('❌ 连接失败: ' + data.error);
+                    const data = await response.json();
+                    if (!response.ok || !data.success) throw new Error(data.error || '连接设置请求失败');
+                    return data;
                 }
-            })
-            .catch(err => {
+                const tested = await postConfig('/api/test-connection');
+                await postConfig('/api/vnc-config');
+                disconnectVNC();
+                await loadNovncInfo();
+                document.getElementById('vncPassword').value = '';
+                toggleSettings();
+                alert('✅ 配置已保存，连接测试成功！分辨率: ' + tested.resolution);
+                addMessage('system', 'VNC 配置已更新，请点击“连接桌面”');
+                refreshScreenshot();
+            } catch (err) {
                 alert('❌ 错误: ' + err.message);
-            });
+            } finally {
+                saveBtn.disabled = false;
+            }
         }
 
         // 快捷键：Enter 发送，Shift+Enter 换行
@@ -860,15 +866,17 @@
         // ====== noVNC 远程桌面集成 ======
 
         // 拉取 websockify 代理端口与 VNC 用户名
-        function loadNovncInfo() {
-            fetch('/api/novnc-info')
-                .then(res => res.json())
-                .then(data => {
-                    if (data.ws_port) novncPort = data.ws_port;
-                    if (data.vnc_user !== undefined) vncUser = data.vnc_user;
-                    if (data.vnc_password) vncPassword = data.vnc_password;
-                })
-                .catch(() => {});
+        async function loadNovncInfo() {
+            novncPort = null;
+            const response = await fetch('/api/novnc-info', { cache: 'no-store' });
+            const data = await response.json();
+            const port = Number(data.ws_port);
+            if (!response.ok || !data.running || !Number.isInteger(port) || port < 1 || port > 65535) {
+                throw new Error(data.error || '桌面代理未就绪或端口无效，请检查服务配置');
+            }
+            novncPort = port;
+            vncUser = data.vnc_user || '';
+            vncPassword = data.vnc_password ?? '';
         }
 
         // 动态加载 noVNC RFB 模块（ES module，缓存避免重复加载）
@@ -901,17 +909,16 @@
 
         // 连接远程桌面
         async function connectVNC() {
-            const RFB = await loadRFB();
-            const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-            const wsUrl = `${wsProto}://${location.hostname}:${novncPort}`;
             const canvas = document.getElementById('vncCanvas');
 
             try {
+                await loadNovncInfo();
+                const RFB = await loadRFB();
+                const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+                const wsUrl = `${wsProto}://${location.hostname}:${novncPort}`;
                 // TightVNC 只支持密码认证（RFB sec type 2），不支持用户名
                 // 即使后端 VNC_CONFIG 有 user 字段也不传给 noVNC，否则握手失败
-                let creds = null;
-                if (vncPassword) creds = { password: vncPassword };
-                rfb = new RFB(canvas, wsUrl, { credentials: creds || undefined });
+                rfb = new RFB(canvas, wsUrl, { credentials: { password: vncPassword } });
             } catch (e) {
                 addMessage('system', '❌ VNC 连接失败: ' + e.message);
                 rfb = null;
@@ -921,15 +928,20 @@
             // 自适应容器尺寸（保持等比缩放）
             rfb.scaleViewport = true;
             rfb.resizeSession = false;
+            const client = rfb;
 
             rfb.addEventListener('connect', () => {
+                if (rfb !== client) return;
                 canvas.style.display = 'block';
+                document.getElementById('screenshotFallback').style.display = 'none';
                 document.getElementById('vncPlaceholder').style.display = 'none';
                 document.getElementById('vncToggleBtn').textContent = '🔌 断开桌面';
                 addMessage('system', '🔗 远程桌面已连接，可直接在画面上操作');
             });
 
             rfb.addEventListener('disconnect', (e) => {
+                // 旧连接延迟到达的事件不能清掉新连接。
+                if (rfb !== client) return;
                 const clean = e.detail && e.detail.clean;
                 rfb = null;
                 canvas.style.display = 'none';
@@ -942,6 +954,7 @@
 
             // 凭据请求（TightVNC 只支持密码认证）
             rfb.addEventListener('credentialsrequired', (e) => {
+                if (rfb !== client) return;
                 let password = vncPassword || prompt('VNC 密码:');
                 if (password) {
                     rfb.sendCredentials({ password: password });
@@ -953,8 +966,9 @@
 
             // 安全握手失败提示
             rfb.addEventListener('securityfailure', (e) => {
+                if (rfb !== client) return;
                 const msg = (e.detail && e.detail.reason) || '未知原因';
-                addMessage('system', '❌ VNC 认证失败: ' + msg);
+                addMessage('system', '❌ VNC 认证失败，请在设置中核对 VNC 密码（不是网页账号密码）: ' + msg);
             });
         }
 
@@ -966,6 +980,8 @@
                 try { r.disconnect(); } catch (e) {}
             }
             document.getElementById('vncCanvas').style.display = 'none';
+            document.getElementById('screenshotFallback').style.display = 'none';
+            document.getElementById('vncPlaceholder').textContent = '🖥️ 点击“连接桌面”开始远程操作';
             document.getElementById('vncPlaceholder').style.display = 'block';
             document.getElementById('vncToggleBtn').textContent = '🔗 连接桌面';
         }

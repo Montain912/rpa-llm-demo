@@ -19,12 +19,12 @@ def _press(key: str) -> dict:
     return {"action": "press", "params": {"key": key}}
 
 
-def _type(text: str) -> dict:
-    return {"action": "type", "params": {"text": text}}
+def _type(text: str, field_type: str = "auto") -> dict:
+    return {"action": "type", "params": {"text": text, "field_type": field_type}}
 
 
-def _click(x: float, y: float) -> dict:
-    return {"action": "click", "params": {"x": x, "y": y}}
+def _click(x: float, y: float, target: str = "") -> dict:
+    return {"action": "click", "params": {"x": x, "y": y, "target": target}}
 
 
 def open_application(application: str, system: str = "win") -> list[dict]:
@@ -66,11 +66,11 @@ def open_application(application: str, system: str = "win") -> list[dict]:
             _wait(1),
         ]
 
-    # Windows: Win 键开开始菜单 → 搜索应用名 → 回车启动 → 最大化
+    # Windows: Win+S 直接聚焦系统搜索 → 搜索应用名 → 回车启动 → 最大化
     return [
-        _press("win"),
+        _press("win+s"),
         _wait(1),
-        _type(application),
+        _type(application, "app_search"),
         _wait(1),
         _press("enter"),
         _wait(2),
@@ -111,77 +111,27 @@ def open_webpage(system: str = "win",
             raise ValueError(f"open_webpage 缺少必要坐标参数: {name}")
 
     return [
-        _click(loginCoordinates["x"], loginCoordinates["y"]),  # 聚焦用户名框
+        _click(loginCoordinates["x"], loginCoordinates["y"], "用户名输入框"),
         _wait(0.5),
-        _type(username),
-        _click(pdCoordinates["x"], pdCoordinates["y"]),        # 聚焦密码框
+        _type(username, "username"),
+        _click(pdCoordinates["x"], pdCoordinates["y"], "密码输入框"),
         _wait(0.3),
-        _type(password),
-        _click(buttonCoordinates["x"], buttonCoordinates["y"]),  # 点登录
+        _type(password, "password"),
+        _click(buttonCoordinates["x"], buttonCoordinates["y"], "登录按钮"),
         _wait(2),
     ]
 
 
 def open_url(url: str, browser: str = "", system: str = "win") -> list[dict]:
-    """
-    技能3：命令行直接打开网址（比视觉点击快且准）。
-    通过系统"运行/终端"用命令启动浏览器访问 URL，再最大化窗口。
+    """在已打开的浏览器地址栏输入 URL，不启动终端、不自动提交。
 
-    Agent 仅有 VNC 键盘通道（无 SSH），无法事先探测浏览器是否安装：
-    - browser 留空：直接输入 URL，走系统默认浏览器（最稳，等价于自动选用已存在的默认浏览器）
-    - browser="chrome"/"firefox"：按系统用对应命令调用；若未安装系统会弹错误框，
-      Agent 下步截图可见并可回退为默认浏览器
-
-    参数:
-        url: 要打开的完整网址（含 http(s)://）
-        browser: 浏览器名，"chrome"/"firefox"/""（默认浏览器）
-        system: "win"（默认）/ "linux"
+    必须由 agent 的字段感知执行器执行这些动作：url 字段输入会独立确认
+    浏览器前台、地址栏焦点和输入法状态，并验收输入结果。
+    browser 参数保留以兼容旧调用；启动浏览器由 open_application 单独负责。
     """
     if not url:
         return []
-
-    system = (system or "win").strip().lower()
-    browser = (browser or "").strip().lower()
-    print("----------------",browser)
-    print("打开网址:", url)
-    if system == "linux":
-        # 开终端 → 用命令启动浏览器（后台 &），xdg-open 走默认
-        if browser == "chrome":
-            launch_cmd = f'google-chrome "{url}" &'
-        elif browser == "firefox":
-            launch_cmd = f'firefox "{url}" &'
-        else:
-            # launch_cmd = f'xdg-open "{url}" &'
-            launch_cmd = f'firefox "{url}" &'
-        return [
-            _press("ctrl+alt+t"),   # 打开终端
-            _wait(1.5),
-            _type(launch_cmd),
-            _press("enter"),
-            _wait(3),               # 等浏览器与页面加载
-            _press("super+up"),     # 最大化浏览器窗口
-            _wait(1),
-        ]
-
-    # Windows：Win+R 打开运行窗口，命令启动浏览器
-    if browser == "chrome":
-        launch_cmd = f'chrome "{url}"'
-    elif browser == "firefox":
-        launch_cmd = f'firefox "{url}"'
-    else:
-        # 直接输入网址，走系统默认浏览器（最稳定，不依赖浏览器名）
-        launch_cmd = url
-
-    print("启动浏览器命令:", launch_cmd)
-    return [
-        _press("win+r"),        # 打开运行对话框
-        _wait(1),
-        _type(launch_cmd),
-        _press("enter"),
-        _wait(3),                # 等浏览器启动与页面加载
-        _press("win+up"),        # 最大化窗口
-        _wait(1),
-    ]
+    return [_type(url, "url")]
 
 
 def _normalize_subtasks(raw_list: list) -> list[dict]:

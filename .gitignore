@@ -1,3 +1,11 @@
-"logs/" 
-"llm_output/" 
-".trae/"
+/logs/
+/llm_output/
+/.trae/
+/screenshots/
+/summary/
+/screenshot.png
+__pycache__/
+*.py[cod]
+/.venv/
+/venv/
+/knowledge/.cache/

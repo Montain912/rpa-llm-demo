@@ -1,7 +1,7 @@
 """
 FastAPI 后端 - RPA+LLM Demo
 提供 REST API 与 WebSocket 推送（替代 Flask + 前端轮询）
-启动：uvicorn main:app --host 0.0.0.0 --port 5000
+启动：python -B main.py（默认前端 5011，桌面代理 6082）
 """
 import os
 import io
@@ -17,7 +17,9 @@ from typing import Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from service_config import HTTP_PORT, WS_PORT, VNC_HOST, VNC_PORT
+from runtime_paths import PROJECT_ROOT, runtime_path
 
 from rpa_agent import RPAgent
 from vnc_client import VNCClient
@@ -29,8 +31,8 @@ warmup_cache()
 app = FastAPI(title="GUI AGENT Demo")
 
 # 静态资源目录（noVNC 等）；目录不存在时创建避免 StaticFiles 抛错
-os.makedirs("static", exist_ok=True)
-app.mount("/static", StaticFiles(directory="static"), name="static")
+(PROJECT_ROOT / "static").mkdir(exist_ok=True)
+app.mount("/static", StaticFiles(directory=PROJECT_ROOT / "static"), name="static")
 
 # 全局状态
 task_state = {
@@ -46,16 +48,14 @@ task_state = {
 
 # 全局 VNC 配置
 VNC_CONFIG = {
-    "host": "host.docker.internal",  #172.20.195.63
-    "port": 5901,   # 5900
+    "host": VNC_HOST,
+    "port": VNC_PORT,
     "user": "",
     "password": "123456",
     "system": "win"
 }
 
-# noVNC websockify 代理端口（与 FastAPI 5000 分离，避免与主服务 socket 冲突）
-# 注：8443 常被 Docker 占用，改用 noVNC 官方示例默认端口 6080
-WS_PORT = 6080
+# HTTP 与 noVNC 代理端口统一由 service_config 配置，VNC 目标端口独立。
 
 state_lock = threading.Lock()
 
@@ -170,7 +170,8 @@ def _get_websockify() -> WebsockifyRunner:
                 target_host=VNC_CONFIG["host"],
                 target_port=VNC_CONFIG["port"],
             )
-            _websockify.start()
+        # 启动失败或子进程退出后，下次连接可重试，不复用已失效的代理。
+        _websockify.start()
         return _websockify
 
 
@@ -185,8 +186,7 @@ def _restart_websockify():
 
 
 # 操作日志目录
-LOG_DIR = "logs"
-os.makedirs(LOG_DIR, exist_ok=True)
+LOG_DIR = str(PROJECT_ROOT / "logs")
 _log_lock = threading.Lock()
 
 
@@ -203,19 +203,6 @@ def _write_log(record: dict):
 
 def run_agent_task(task: str):
     """在后台线程中运行 RPA Agent"""
-    # 创建本次任务的日志文件
-    log_file = os.path.join(LOG_DIR, f"task_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl")
-    with state_lock:
-        task_state["log_file"] = log_file
-
-    _write_log({"type": "task_start", "task": task})
-
-    agent = RPAgent(
-        vnc_host=VNC_CONFIG["host"],
-        vnc_port=VNC_CONFIG["port"],
-        vnc_password=VNC_CONFIG["password"]
-    )
-
     def progress_callback(step_info):
         with state_lock:
             task_state["current_step"] = step_info["step"]
@@ -232,6 +219,17 @@ def run_agent_task(task: str):
             return None
 
     try:
+        # 初始化错误也必须回收 running 状态，避免前端一直显示“正在执行”。
+        log_file = str(runtime_path("logs", f"task_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jsonl"))
+        with state_lock:
+            task_state["log_file"] = log_file
+        _write_log({"type": "task_start", "task": task})
+        agent = RPAgent(
+            vnc_host=VNC_CONFIG["host"],
+            vnc_port=VNC_CONFIG["port"],
+            vnc_password=VNC_CONFIG["password"],
+            system=VNC_CONFIG.get("system", "win"),
+        )
         result = agent.run_task(task, progress_callback=progress_callback, control_checker=control_checker)
         with state_lock:
             task_state["result"] = result
@@ -239,7 +237,10 @@ def run_agent_task(task: str):
     except Exception as e:
         with state_lock:
             task_state["result"] = f"执行出错: {str(e)}"
-        _write_log({"type": "error", "error": str(e)})
+        try:
+            _write_log({"type": "error", "error": str(e)})
+        except OSError:
+            pass  # 日志目录不可写时，仍通过状态接口和 WebSocket 返回原始错误。
     finally:
         with state_lock:
             task_state["running"] = False
@@ -318,7 +319,7 @@ class PauseRequest(BaseModel):
 @app.get("/", response_class=HTMLResponse)
 def index():
     """返回前端页面"""
-    return open("templates/index.html", "r", encoding="utf-8").read()
+    return (PROJECT_ROOT / "templates" / "index.html").read_text(encoding="utf-8")
 
 
 @app.get("/api/screenshot")
@@ -334,7 +335,7 @@ def get_screenshot():
                 _reset_screenshot_vnc()
                 vnc = _get_screenshot_vnc()
                 img = vnc.screenshot()
-        img.save("screenshot.png")
+        img.save(PROJECT_ROOT / "screenshot.png")
 
         # 压缩图片
         img.thumbnail((1440, 900))
@@ -375,7 +376,14 @@ def start_task(req: TaskRequest):
 
     # 启动后台线程
     thread = threading.Thread(target=run_agent_task, args=(task,), daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except Exception as exc:
+        with state_lock:
+            task_state["running"] = False
+            task_state["result"] = f"任务线程启动失败: {exc}"
+        _notify_ws({"type": "result", "result": task_state["result"], "running": False})
+        return JSONResponse({"success": False, "error": task_state["result"]}, status_code=500)
 
     return {"success": True, "message": "任务已启动"}
 
@@ -421,7 +429,7 @@ def stop_task():
 
 class VNCConfigRequest(BaseModel):
     host: Optional[str] = None
-    port: Optional[int] = None
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
     password: Optional[str] = None
 
 
@@ -453,23 +461,22 @@ def set_vnc_config(req: VNCConfigRequest):
 
 class ConnectionTestRequest(BaseModel):
     host: Optional[str] = None
-    port: Optional[int] = None
+    port: Optional[int] = Field(default=None, ge=1, le=65535)
     password: Optional[str] = None
 
 
 @app.post("/api/test-connection")
 def test_connection(req: ConnectionTestRequest):
     """测试 VNC 连接"""
+    vnc = None
     try:
         host = req.host or VNC_CONFIG["host"]
         port = req.port if req.port is not None else VNC_CONFIG["port"]
-        password = req.password or VNC_CONFIG["password"]
-        print("host--port--password:",host,"--",port,"--",password)
+        password = req.password if req.password is not None else VNC_CONFIG["password"]
 
         vnc = VNCClient(host=host, port=port, password=password)
         vnc.connect()
         img = vnc.screenshot()
-        vnc.disconnect()
 
         return {
             "success": True,
@@ -478,12 +485,24 @@ def test_connection(req: ConnectionTestRequest):
         }
     except Exception as e:
         return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+    finally:
+        if vnc is not None:
+            try:
+                vnc.disconnect()
+            except Exception:
+                pass
 
 
 @app.get("/api/novnc-info")
 def novnc_info():
     """返回 websockify 代理端口与目标信息，供前端拼 WebSocket URL"""
-    runner = _get_websockify()
+    try:
+        runner = _get_websockify()
+    except Exception as exc:
+        return JSONResponse(
+            {"running": False, "error": f"桌面代理端口 {WS_PORT} 启动失败: {exc}"},
+            status_code=503,
+        )
     return {
         "ws_port": WS_PORT,
         "target_host": VNC_CONFIG["host"],
@@ -496,10 +515,9 @@ def novnc_info():
 
 if __name__ == "__main__":
     import uvicorn
-    # 先启动 websockify 代理（noVNC 前端通过 WS:8443 连接远程桌面）
-    _get_websockify()
+    # 桌面代理在连接时启动；即使代理不可用，仍可打开前端修改 VNC 设置。
     try:
-        uvicorn.run(app, host="0.0.0.0", port=5000)
+        uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT)
     finally:
         # 主进程退出时关闭 websockify 子进程
         if _websockify is not None:

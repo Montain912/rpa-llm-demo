@@ -9,6 +9,7 @@ import os
 import time
 from openai import OpenAI
 from PIL import Image
+from runtime_paths import runtime_path
 import random
 
 
@@ -142,15 +143,18 @@ def chat_text(prompt: str, system_prompt: str = "你是一个有帮助的助手�
     return response.choices[0].message.content
 
 
-def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一个视觉助手，能够分析截图并描述界面元素。", temperature: float = 0.5, max_tokens: int = 1024) -> str:
+def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一个视觉助手，能够分析截图并描述界面元素。", temperature: float = 0.5, max_tokens: int = 1024, image_format: str = "JPEG") -> str:
     """
     调用视觉模型，传入截图进行分析
     默认低温度 + 小 max_tokens：决策类输出只需一个小 JSON，缩短生成时间
     """
     r = random.randint(0, 1000000)
     img = shrink_for_llm(image)
-    img_base64 = image_to_base64(img, format="JPEG")
-    image.save(f"./llm_output/screenshot_{r}.png")
+    image_format = image_format.upper()
+    if image_format not in {"PNG", "JPEG"}:
+        raise ValueError("image_format 必须为 PNG 或 JPEG")
+    img_base64 = image_to_base64(img.convert("RGB"), format=image_format)
+    image.save(runtime_path("llm_output", f"screenshot_{r}.png"))
     
     
     response = client.chat.completions.create(
@@ -164,7 +168,7 @@ def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{img_base64}",
+                            "url": f"data:image/{image_format.lower()};base64,{img_base64}",
                             "detail": "auto"
                         }
                     }
@@ -177,7 +181,7 @@ def chat_vision(prompt: str, image: Image.Image, system_prompt: str = "你是一
     )
     token_tracker.record("vision", VISION_MODEL, response.usage)
     # print(response.choices[0].message)
-    with open(f"./llm_output/vision_response_{r}.txt", "w") as f:
+    with open(runtime_path("llm_output", f"vision_response_{r}.txt"), "w", encoding="utf-8") as f:
         f.write(response.choices[0].message.content)
     # print("----------",response.choices[0].message.content)
     return response.choices[0].message.content

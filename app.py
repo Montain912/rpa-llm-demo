@@ -3,6 +3,7 @@ Flask 后端 - RPA+LLM Demo
 提供 REST API 供前端调用
 """
 import os
+from service_config import HTTP_PORT
 import io
 import json
 import base64
@@ -98,7 +99,8 @@ def run_agent_task(task: str):
     agent = RPAgent(
         vnc_host=VNC_CONFIG["host"],
         vnc_port=VNC_CONFIG["port"],
-        vnc_password=VNC_CONFIG["password"]
+        vnc_password=VNC_CONFIG["password"],
+        system=VNC_CONFIG.get("system", "win"),
     )
 
     def progress_callback(step_info):
@@ -288,4 +290,4 @@ def test_connection():
 if __name__ == "__main__":
     # 确保 templates 目录存在
     os.makedirs("templates", exist_ok=True)
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=HTTP_PORT, debug=True)

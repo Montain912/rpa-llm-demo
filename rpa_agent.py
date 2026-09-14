@@ -8,6 +8,8 @@ import re
 import json
 import time
 from PIL import Image
+from runtime_paths import runtime_path
+from verified_interaction import VerifiedInteraction, ObservationRequired
 from llm_client import chat_vision, chat_text, token_tracker
 from vnc_client import VNCClient
 from knowledge_loader import get_summary
@@ -33,24 +35,39 @@ _OS_SHORTCUT_HINTS = {
 }
 OS_SHORTCUT_HINT = _OS_SHORTCUT_HINTS.get(SYSTEM, _OS_SHORTCUT_HINTS[SYSTEM])
 
+
+def _normalize_system(system: str) -> str:
+    value = (system or SYSTEM).strip().lower()
+    value = {"win": "windows", "win32": "windows"}.get(value, value)
+    if value not in _OS_SHORTCUT_HINTS:
+        raise ValueError(f"不支持的桌面系统配置: {value}")
+    return value
+
+
+def _prompt_for_system(template: str, system: str) -> str:
+    """Use the remote desktop's OS, not a global default shared by all agents."""
+    return template.replace(OS_SHORTCUT_HINT, _OS_SHORTCUT_HINTS[system]).replace(
+        f"当前操作系统为：\n{SYSTEMTYPE}", f"当前操作系统为：\n{system.upper()}"
+    )
+
 SYSTEM_PROMPT = """你是一个 GUI 自动化智能体（Computer Use Agent）。你的任务是通过观察屏幕截图，分析当前界面状态，并决定下一步操作来完成用户的任务。
 
 你可以执行以下操作类型：
-1. click(x, y) - 点击屏幕上的指定坐标（左键）
-2. double_click(x, y) - 双击指定坐标
-3. right_click(x, y) - 右键点击指定坐标
-4. type(text) - 在当前焦点位置输入文本
+1. click(x, y, target) - 独立验收后点击指定目标，target 必填
+2. double_click(x, y, target) - 独立验收后双击指定目标，target 必填
+3. right_click(x, y, target) - 独立验收后右键点击指定目标，target 必填
+4. type(text, field_type, replace=true) - 确认焦点与输入法后输入，自动独立验收
 5. press(key) - 按下按键；支持单键（enter, escape, tab, backspace, space, up, down, left, right 等）与组合键（ctrl+n, alt+f4, shift+tab 等，用 '+' 分隔）
-6. scroll(direction) - 滚动鼠标滚轮（up 或 down）
+6. scroll(x, y, direction, amount, target) - 在指定容器内滚动，x/y 和 target 必填；direction 为 up/down，amount 为 1~5
 7. wait(seconds) - 等待一段时间（用于页面加载等，seconds 为 0.5~3 的数字）
 8. done() - 任务完成，结束循环
-9. skill_open_app(application) - 【固定流程技能】打开指定应用。会自动通过开始菜单搜索并启动、最大化窗口，无需你分步点击。例：{"action": "skill_open_app", "params": {"application": "edge"}}
+9. skill_open_app(application) - 【固定流程技能】通过系统搜索输入、独立验收后启动应用。浏览器启动后自动确认前台并最大化，已经最大化则跳过；下一步按新截图继续。例：{"action": "skill_open_app", "params": {"application": "edge"}}
 10. skill_open_webpage(needlogin, username, password, loginCoordinates, pdCoordinates, buttonCoordinates) - 【固定流程技能】在已打开的登录网页上自动完成填表登录。当你能在截图中看到登录表单时使用：先识别出用户名输入框、密码输入框、登录按钮三者的归一化坐标，一次性传入，系统会自动按"点用户名框→输入账号→点密码框→输入密码→点登录"的固定流程执行，无需你分步操作。
     例：{"action": "skill_open_webpage", "params": {"needlogin": true, "username": "admin", "password": "123456", "loginCoordinates": {"x": 0.5, "y": 0.24}, "pdCoordinates": {"x": 0.5, "y": 0.30}, "buttonCoordinates": {"x": 0.46, "y": 0.40}}}
     若网页无需登录（needlogin=false），不要使用此技能。
-11. skill_open_url(url, browser) - 【固定流程技能】用系统命令行直接启动浏览器并打开指定网址，比视觉点击地址栏更快更准。访问网址时优先使用。browser 可留空（走系统默认浏览器，最稳），或指定 "chrome"/"firefox"。
+11. skill_open_url(url, browser) - 【固定流程技能】先独立确认前台是浏览器，再聚焦地址栏输入网址并验收；不启动浏览器，也不输入终端命令。浏览器未打开时先 skill_open_app。
     例：{"action": "skill_open_url", "params": {"url": "https://example.com/login", "browser": ""}}
-    该技能只负责打开网页并等待加载；页面打开后若需登录，再调用 skill_open_webpage。
+    输入验收通过后需要单独 press(enter) 导航；页面打开后若需登录，再调用 skill_open_webpage。
 12. planning() - 【任务规划工具】当固定流程（打开应用/打开网址/登录）已完成，进入需要逐步操作的复杂任务阶段时调用。调用后系统会用当前截图分析页面并生成结构化子任务列表，后续逐步执行。无需参数。
     例：{"action": "planning", "params": {}, "thought": "登录已完成，需要规划测试任务"}
 13. subtask_done(result, passed) - 【子任务完成标记】当当前子任务的操作已完成并达到预期时调用，标记该子任务完成并进入下一个子任务。result 为实际操作结果描述，passed 为是否达到预期（true/false）。所有子任务完成后输出 done()。
@@ -67,7 +84,7 @@ SYSTEM_PROMPT = """你是一个 GUI 自动化智能体（Computer Use Agent）�
 - x 和 y 必须是 0 到 1 之间的相对比例值（小数），表示目标点在截图宽度和高度中的位置比例
 - 例如：屏幕正中间是 x=0.5, y=0.5；左上角附近是 x=0.05, y=0.1；右下角"开始"按钮在 x=0.95, y=0.97
 - 严禁输出像素值（如 500、300），严禁输出大于 1 的数值
-- 比例坐标与分辨率完全无关：系统会自动把你给的比例映射到真实屏幕像素。无论截图是 1920 还是 2560 宽，同一目标的比例值都一样
+- 比例坐标只对应当前这张完整截图；窗口大小或布局变化后必须重新定位，不能沿用旧截图坐标
 - 严禁做任何分辨率换算、缩放系数乘法、DPI 补偿。你只需目测目标在当前截图中的相对位置比例，直接报告该比例即可
 - 点击/双击操作的坐标点必须定位到**待点击区域的几何正中心**：
   - 按钮：按钮边框矩形的正中心（按钮内含文字/图标，点整块区域的中心）
@@ -82,7 +99,8 @@ SYSTEM_PROMPT = """你是一个 GUI 自动化智能体（Computer Use Agent）�
 - JSON 格式：{"action": "操作类型", "params": {...参数}, "thought": "你的思考过程"}
 
 示例：
-- 点击按钮：{"action": "click", "params": {"x": 0.52, "y": 0.31}, "thought": "我看到了'开始'按钮，点击它"}
+- 点击按钮：{"action": "click", "params": {"x": 0.52, "y": 0.31, "target": "开始按钮"}, "thought": "我看到了'开始'按钮，点击它"}
+- 滚动弹层：{"action": "scroll", "params": {"x": 0.65, "y": 0.5, "direction": "down", "amount": 3, "target": "测试类型下拉列表"}, "thought": "在可见弹层内寻找目标选项"}
 - 输入文字：{"action": "type", "params": {"text": "hello world"}, "thought": "在输入框中输入文字"}
 - 按回车：{"action": "press", "params": {"key": "enter"}, "thought": "按回车键确认"}
 - 等待加载：{"action": "wait", "params": {"seconds": 2}, "thought": "页面正在加载，等待"}
@@ -187,13 +205,34 @@ PLANNING_TOOL_PROMPT = """你是一个 GUI 自动化测试规划助手。请分�
 ]
 """
 
+VERIFIED_ACTION_GUIDANCE = """
+【已启用独立输入和鼠标验收，以下规则优先】
+- 仅执行用户明确要求的流程。查询任务不能生成新增、编辑、删除、发布等额外测试。
+- 所有鼠标操作必须有 target，使用截图中的准确文字或明确图标名称。
+- scroll 必须给 x/y（目标容器内的点）、direction='up/down'、amount=1~5、target；不能只滚动屏幕中心。
+- type(text, field_type='url/username/password/app_search/text', replace=true) 和 skill_input_text 启用统一输入法模块。
+- 每次输入都会自动进行独立截图验收；通过后才能继续。不要重复追加已输入的内容。
+- skill_open_app(application) 会通过系统搜索启动并验收输入，不能输入浏览器启动命令到普通编辑器。
+- skill_open_url(url) 先确认浏览器前台并确保最大化，再聚焦地址栏、输入并验收，不自动回车；之后 press(enter) 才导航。
+- 点击或双击明确的浏览器启动图标后也会自动最大化。窗口变化后按新截图定位，不复用旧窗口坐标。
+- 不能把记事本、终端或页面输入框当作浏览器地址栏。先打开浏览器并确认窗口，再调用网址技能。
+- 登录可用原 skill_open_webpage 一次宏；宏内部每次点击和输入都将独立验收，失败即返回观察，不执行剩余子动作。
+- 已正确的字段、已选中的多选项不要重复输入或点击。每选一项，必须核对标签/勾选仍保留。
+- 鼠标目标验收未通过会返回建议；依据新截图重新规划，不得声称未执行的动作已成功。
+- done/subtask_done 由独立截图验收决定，不是模型宣告就能通过。
+"""
+
 
 
 class RPAgent:
     """RPA 智能体，执行观察-决策-执行ui循环"""
 
-    def __init__(self, vnc_host: str = "localhost", vnc_port: int = 5901, vnc_password: str = "123456"):
-        self.vnc = VNCClient(host=vnc_host, port=vnc_port, password=vnc_password)
+    def __init__(self, vnc_host: str = "localhost", vnc_port: int = 5901, vnc_password: str = "123456",
+                 system: str = SYSTEM):
+        self.system = _normalize_system(system)
+        self.vnc = VNCClient(host=vnc_host, port=vnc_port, password=vnc_password, system=self.system)
+        self.interaction = VerifiedInteraction(self, lambda *args, **kwargs: chat_vision(*args, **kwargs))
+        self._last_action_executed = False
         self.max_steps = 120  # 最大步数，防止无限循环
         self.step = 0
         self.history = []  # 操作历史
@@ -310,20 +349,20 @@ class RPAgent:
     def _expand_skill(self, skill_action: str, params: dict) -> list:
         """将技能动作展开为确定性子动作列表；参数非法时返回单步 wait 并提示
 
-        系统类型一律使用配置常量 SYSTEM（模型不传也无法传错，防止跨系统误用快捷键）
+        系统类型使用该任务实例的桌面配置，模型不能覆盖系统参数。
         """
         try:
             if skill_action == "skill_open_app":
                 return open_application(
                     application=params.get("application", ""),
-                    system=SYSTEM,
+                    system=self.system,
                 )
 
             if skill_action == "skill_open_url":
                 return open_url(
                     url=params.get("url", ""),
                     browser=params.get("browser", ""),
-                    system=SYSTEM,
+                    system=self.system,
                 )
 
             if skill_action == "skill_open_webpage":
@@ -332,7 +371,7 @@ class RPAgent:
                 if isinstance(needlogin, str):
                     needlogin = needlogin.strip().lower() in ("true", "1", "yes", "是")
                 return open_webpage(
-                    system=SYSTEM,
+                    system=self.system,
                     needlogin=bool(needlogin),
                     username=params.get("username", ""),
                     password=params.get("password", ""),
@@ -356,43 +395,57 @@ class RPAgent:
         action = action_data.get("action", "wait")
         params = action_data.get("params", {})
         thought = action_data.get("thought", "")
+        self._last_action_executed = False
 
         print(f"[Step {self.step}] 动作: {action}, 参数: {params}")
         print(f"  思考: {thought}")
 
         try:
+            if action in {"skill_input_text", "input_text", "retry_text_input", "type"}:
+                self.interaction.input(params.get("text", ""), params.get("field_type", "auto"),
+                                       replace=params.get("replace", True))
+                self._last_action_executed = True
+                return True
+            if action == "skill_open_url":
+                self.interaction.open_url(params.get("url", ""))
+                self._last_action_executed = True
+                return True
+            if action == "skill_open_app":
+                self.interaction.open_app(params.get("application", ""))
+                self._last_action_executed = True
+                return True
+            if action == "verify_text_input":
+                if self.interaction.pending and not self.interaction.pending['verified']:
+                    raise ObservationRequired('字段尚未通过独立验收，请重新聚焦原字段后替换输入')
+                self._last_action_executed = True
+                return True
             if action == "click":
-                x, y = self._to_pixels(params, screenshot)
-                self.vnc.click(x, y)
-                # 点任务栏区域（归一化 y>0.95）通常是打开/切换应用，确定性最大化窗口
-                if float(params.get("y", 0)) > 0.95:
-                    self.vnc.maximize_window(SYSTEM)
+                self.interaction.pointer(action, params, screenshot)
+                if VerifiedInteraction.is_browser_launch_target(params.get('target', '')):
+                    time.sleep(.8)
+                    self.interaction.ensure_browser_maximized()
 
             elif action == "double_click":
-                x, y = self._to_pixels(params, screenshot)
-                self.vnc.double_click(x, y)
-                # 双击桌面图标打开应用后，确定性最大化窗口
-                self.vnc.maximize_window(SYSTEM)
+                self.interaction.pointer(action, params, screenshot)
+                if VerifiedInteraction.is_browser_launch_target(params.get('target', '')):
+                    time.sleep(.8)
+                    self.interaction.ensure_browser_maximized()
 
             elif action == "right_click":
-                x, y = self._to_pixels(params, screenshot)
-                self.vnc.click(x, y, button=3)
-
-            elif action == "type":
-                text = params.get("text", "")
-                self.vnc.type_text(text)
+                self.interaction.pointer(action, params, screenshot)
 
             elif action == "press":
                 key = params.get("key", "")
-                self.vnc.press_key(key)
+                self.interaction.press(key)
 
             elif action == "scroll":
-                direction = params.get("direction", "down")
-                # 获取当前鼠标位置（用屏幕中心）
-                screenshot = self.vnc.screenshot()
-                cx, cy = screenshot.width // 2, screenshot.height // 2
-                dir_val = 1 if direction == "up" else -1
-                self.vnc.scroll(cx, cy, dir_val)
+                self.interaction.pointer(action, params, screenshot)
+
+            elif action == "maximize_window":
+                if VerifiedInteraction.is_browser_application(getattr(self, 'task', '')):
+                    self.interaction.ensure_browser_maximized()
+                else:
+                    self.vnc.maximize_window(self.system)
 
             elif action == "wait":
                 # 模型可指定等待时长，限制在 0.5~3 秒避免浪费
@@ -404,10 +457,12 @@ class RPAgent:
                 time.sleep(max(0.5, min(3.0, seconds)))
 
             elif action == "done":
+                self.interaction.verify_completion()
+                self._last_action_executed = True
                 print("任务完成！")
                 return False
 
-            elif action in ("skill_open_app", "skill_open_webpage", "skill_open_url"):
+            elif action == "skill_open_webpage":
                 # 固定流程技能：展开为确定性子动作顺序执行（一个决策步内完成）
                 sub_steps = self._expand_skill(action, params)
                 print(f"  [技能] 展开为 {len(sub_steps)} 个子步骤")
@@ -416,7 +471,9 @@ class RPAgent:
                     sub_params = sub.get("params", {})
                     print(f"  [技能 {i}/{len(sub_steps)}] {sub_action} {sub_params}")
                     # 子动作坐标基于当步截图换算；子动作不含 done，忽略其返回值
-                    self._execute_action(sub, screenshot)
+                    self._execute_action(sub, self.vnc.screenshot())
+                    if not self._last_action_executed:
+                        return True
 
             elif action == "planning":
                 # 已存在计划时忽略重复调用，避免阶段2中覆盖正在执行的子任务列表
@@ -439,10 +496,12 @@ class RPAgent:
                         print(f"  [规划] 解析失败，继续使用基础动作模式")
 
             elif action == "subtask_done":
+                current = self.task_plan[self.current_plan_idx] if 0 <= self.current_plan_idx < len(self.task_plan) else {}
+                self.interaction.verify_state(current.get('expected_result', params.get('result', '当前步骤完成')))
                 # 暂存本子任务执行结果，由 run_task 的 for 循环读取后写入计划并推进
                 self._subtask_result = {
                     "result": params.get("result", ""),
-                    "passed": bool(params.get("passed", False)),
+                    "passed": True,
                 }
                 passed_str = "通过" if self._subtask_result["passed"] else "未通过"
                 print(f"  [子任务 {self.current_plan_idx + 1}/{len(self.task_plan)}] "
@@ -479,13 +538,14 @@ class RPAgent:
                         print(f"    {i}. {st['content']}")
 
             else:
-                print(f"未知动作: {action}")
-                time.sleep(1)
+                raise ObservationRequired(f"未知动作: {action}，请使用已提供的动作接口")
 
         except Exception as e:
+            self._repeat_guidance = f"【本步未完成】{e}。请根据当前截图重新规划这一步，不得假定成功。"
             print(f"执行动作出错: {e}")
-            time.sleep(1)
+            return True
 
+        self._last_action_executed = True
         return True
 
     @staticmethod
@@ -548,10 +608,16 @@ class RPAgent:
 任务规划是：{self.planning}
 当前是第 {self.step} 步操作。请分析当前屏幕截图，判断界面状态，并决定下一步应该执行什么操作。
 {knowledge_block}{subtask_block}{guidance_block}
+持久执行事实：{'用户要求的单次搜索点击已经执行，不能再次搜索。应读取已有结果并完成剩余步骤。' if self.interaction._one_shot_search_sent else '尚未记录单次搜索点击。'}
 之前的操作历史：
-{json.dumps(self.history[-5:], ensure_ascii=False, indent=2) if self.history else '（无，这是第一步）'}
+{json.dumps([{k: h[k] for k in ('step', 'action', 'params', 'thought', 'executed') if k in h} for h in self.history[-5:]], ensure_ascii=False) if self.history else '（无，这是第一步）'}
 
-请输出下一步操作的 JSON。"""
+请先确定这一步的真实目的，再生成对应动作和坐标；不要沿用历史里的 action/params。
+输出字段必须按此顺序：{{"thought":"当前证据和紧接着要做的事", "action":"动作", "params":{{...}}}}。
+thought 中说退出时 params.target 也必须是退出控件；说关闭弹层时不能输出点击已选选项。
+若多选已选中，不要再次点击它。关闭弹层可先试一次 Escape；若此前已试过且不生效，
+必须改为点击弹层外明确的空白区域或下拉箭头，不得重复 Escape/Wait 循环。
+请只输出下一步操作的 JSON。"""
 
         action_data = None
         last_invalid_reason = ""
@@ -559,7 +625,8 @@ class RPAgent:
             hint = ""
             if attempt == 1 and last_invalid_reason:
                 hint = f"\n注意：上一次输出无效（{last_invalid_reason}）。x/y 必须是 0~1 的相对比例值，严禁像素值。"
-            response = chat_vision(prompt + hint, screenshot, system_prompt=SYSTEM_PROMPT)
+            response = chat_vision(prompt + hint, screenshot,
+                                   system_prompt=_prompt_for_system(SYSTEM_PROMPT, self.system) + VERIFIED_ACTION_GUIDANCE)
             candidate = self._parse_action(response)
 
             action = (candidate.get("action") or "").lower()
@@ -598,7 +665,7 @@ class RPAgent:
                 print(f"  [防护] 动作重复且画面未变化 ({action_data.get('action')})，跳过执行")
                 self._repeat_guidance = (
                     "重要：上一步操作后画面没有任何变化，说明该操作未生效。"
-                    "请判断：①若目标是输入框且应已聚焦，直接执行 type 输入，不要再点击；"
+                    "重新确认当前窗口和字段焦点，不能假定已聚焦或盲目输入；"
                     "②若是应用/页面正在启动加载，执行 wait(2) 耐心等待；"
                     "③若点击没有命中目标，重新瞄准目标的视觉中心，或换一种操作方式（如改用快捷键）。"
                 )
@@ -609,6 +676,7 @@ class RPAgent:
 
         # 4. 执行
         t_exec_start = time.perf_counter()
+        self.interaction.evidence = []
         self._execute_action(action_data, screenshot)
         t_exec = time.perf_counter() - t_exec_start
 
@@ -625,7 +693,9 @@ class RPAgent:
             "step": self.step,
             "action": action_data.get("action"),
             "params": action_data.get("params", {}),
-            "thought": action_data.get("thought", ""),
+            "thought": action_data.get("thought", "") if self._last_action_executed else self._repeat_guidance,
+            "executed": self._last_action_executed,
+            "verification": self.interaction.evidence,
             "duration": duration,
         }
         if plan is not None:
@@ -636,6 +706,22 @@ class RPAgent:
                 "expected_result": plan["expected_result"],
             }
         self.history.append(step_record)
+
+        # Logout is a candidate terminal event, not an automatic success claim.
+        # Audit the full task with historical query evidence before another
+        # planning step can mistake the final login page for the initial state.
+        completion_verified = False
+        if (step_record['executed'] and step_record['action'] in {'click', 'double_click'}
+                and self.interaction.control_role(str(step_record['params'].get('target', ''))) == 'logout'
+                and re.search(r'退出登录|登出|注销|logout|sign out', task, re.I)):
+            try:
+                self.interaction.verify_completion()
+                completion_verified = True
+            except ObservationRequired as exc:
+                self._repeat_guidance = f'退出动作已执行，但完整任务验收尚未通过：{exc}。先核对缺少的证据，不能假定从未执行任务而重新登录。'
+            step_record['completion_verified'] = completion_verified
+            duration['execute'] = round(time.perf_counter() - t_exec_start, 2)
+            duration['total'] = round(time.perf_counter() - t_step_start, 2)
 
         if progress_callback:
             progress_callback(step_record)
@@ -648,6 +734,10 @@ class RPAgent:
 
         # 5. 返回阶段状态码
         action_name = (action_data.get("action") or "").lower()
+        if not self._last_action_executed:
+            return "continue"
+        if completion_verified:
+            return "done"
         if action_name == "done":
             return "done"
         if plan is None and action_name == "planning" and self.task_plan:
@@ -675,23 +765,24 @@ class RPAgent:
         self._subtask_result = None
         self._prev_screenshot = None
         self._repeat_guidance = ""
+        self.interaction = VerifiedInteraction(self, lambda *args, **kwargs: chat_vision(*args, **kwargs))
         token_tracker.reset()
-        self.vnc.connect()
-
-        # 加载知识摘要：按任务文本匹配页面知识，注入后续每步 prompt
-        self.knowledge_summary = get_summary(task)
-        if self.knowledge_summary:
-            print(f"[知识] 匹配到页面知识，已注入决策上下文")
-        knowledge_block = f"\n{self.knowledge_summary}\n" if self.knowledge_summary else ""
-        self.planning = chat_text(task + knowledge_block, SYSTEM_PROMPT_PLANNING)
-
-        # 预处理：确定性地显示桌面（最小化所有窗口），避免 LLM 读到 IDE/浏览器自身页面
-        # Windows: win+d；Linux(GNOME): super+d
-        show_desktop_key = "super+d" if SYSTEM == "linux" else "win+d"
-        self.vnc.press_key(show_desktop_key)
-        time.sleep(1.0)
 
         try:
+            self.vnc.connect()
+
+            # 初始化与规划也需要异常清理；余额不足等错误发生在第一步之前。
+            self.knowledge_summary = get_summary(task)
+            if self.knowledge_summary:
+                print("[知识] 匹配到页面知识，已注入决策上下文")
+            knowledge_block = f"\n{self.knowledge_summary}\n" if self.knowledge_summary else ""
+            self.planning = chat_text(task + knowledge_block,
+                                      _prompt_for_system(SYSTEM_PROMPT_PLANNING, self.system) + VERIFIED_ACTION_GUIDANCE)
+
+            show_desktop_key = "super+d" if self.system == "linux" else "win+d"
+            self.vnc.press_key(show_desktop_key)
+            time.sleep(1.0)
+
             # 阶段1：固定流程（打开应用/打开网址/登录），直到 planning 生成子任务计划
             while self.step < self.max_steps:
                 status = self._decision_step(task, knowledge_block, None,
@@ -742,11 +833,18 @@ class RPAgent:
             return result_msg
 
         finally:
-            self.vnc.disconnect()
-            token_tracker.save(f"./summary/token_usage_{self.rand}.json")
+            # 清理或统计文件错误不能覆盖原始任务失败原因。
+            try:
+                self.vnc.disconnect()
+            except Exception as exc:
+                print(f"[清理] 断开 VNC 失败: {exc}")
+            try:
+                token_tracker.save(str(runtime_path("summary", f"token_usage_{self.rand}.json")))
+            except Exception as exc:
+                print(f"[统计] 保存消耗记录失败: {exc}")
 
     def saveScreenShot(self, step: int, rand: int, screenshot: Image.Image):
-        screenshot.save(f"./screenshots/sh_{rand}_{step}.png")
+        screenshot.save(runtime_path("screenshots", f"sh_{rand}_{step}.png"))
 
 
 if __name__ == "__main__":
