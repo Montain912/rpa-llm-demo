@@ -1,7 +1,7 @@
 """
 FastAPI 后端 - RPA+LLM Demo
 提供 REST API 与 WebSocket 推送（替代 Flask + 前端轮询）
-启动：python main.py（默认 5010）；或 uvicorn main:app --host 0.0.0.0 --port 5010
+启动：uvicorn main:app --host 0.0.0.0 --port 5000
 """
 import os
 import io
@@ -13,23 +13,6 @@ import asyncio
 import threading
 from datetime import datetime
 from typing import Optional
-
-
-def _configure_console_stream(stream) -> None:
-    """Keep redirected Windows logs from crashing on Unicode model output."""
-    reconfigure = getattr(stream, "reconfigure", None)
-    if not callable(reconfigure):
-        return
-    try:
-        reconfigure(encoding="utf-8", errors="backslashreplace")
-    except (OSError, TypeError, ValueError):
-        # Some embedded/test streams cannot be reconfigured.  Logging must
-        # never prevent the agent from continuing its guarded execution.
-        pass
-
-
-_configure_console_stream(sys.stdout)
-_configure_console_stream(sys.stderr)
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -63,16 +46,16 @@ task_state = {
 
 # 全局 VNC 配置
 VNC_CONFIG = {
-    "host": "127.0.0.1",
-    "port": 5901,
+    "host": "host.docker.internal",  #172.20.195.63
+    "port": 5901,   # 5900
     "user": "",
-    "password": "LocalVNC",
+    "password": "123456",
     "system": "win"
 }
 
-# 与用户正在使用的 5000/6080 服务隔离，可按环境覆盖。
-HTTP_PORT = int(os.environ.get("RPA_HTTP_PORT", "5010"))
-WS_PORT = int(os.environ.get("RPA_WS_PORT", "6081"))
+# noVNC websockify 代理端口（与 FastAPI 5000 分离，避免与主服务 socket 冲突）
+# 注：8443 常被 Docker 占用，改用 noVNC 官方示例默认端口 6080
+WS_PORT = 6080
 
 state_lock = threading.Lock()
 
@@ -89,8 +72,7 @@ def _get_screenshot_vnc() -> VNCClient:
             host=VNC_CONFIG["host"],
             port=VNC_CONFIG["port"],
             user=VNC_CONFIG["user"],
-            password=VNC_CONFIG["password"],
-            system=VNC_CONFIG["system"],
+            password=VNC_CONFIG["password"]
         )
         vnc.connect()
         _screenshot_vnc = vnc
@@ -231,9 +213,7 @@ def run_agent_task(task: str):
     agent = RPAgent(
         vnc_host=VNC_CONFIG["host"],
         vnc_port=VNC_CONFIG["port"],
-        vnc_password=VNC_CONFIG["password"],
-        vnc_user=VNC_CONFIG["user"],
-        system=VNC_CONFIG["system"],
+        vnc_password=VNC_CONFIG["password"]
     )
 
     def progress_callback(step_info):
@@ -484,7 +464,7 @@ def test_connection(req: ConnectionTestRequest):
         host = req.host or VNC_CONFIG["host"]
         port = req.port if req.port is not None else VNC_CONFIG["port"]
         password = req.password or VNC_CONFIG["password"]
-        print(f"VNC test target: {host}:{port}")
+        print("host--port--password:",host,"--",port,"--",password)
 
         vnc = VNCClient(host=host, port=port, password=password)
         vnc.connect()
@@ -516,10 +496,10 @@ def novnc_info():
 
 if __name__ == "__main__":
     import uvicorn
-    # 先启动独立 websockify 代理，前端从 /api/novnc-info 获取端口。
+    # 先启动 websockify 代理（noVNC 前端通过 WS:8443 连接远程桌面）
     _get_websockify()
     try:
-        uvicorn.run(app, host="0.0.0.0", port=HTTP_PORT)
+        uvicorn.run(app, host="0.0.0.0", port=5000)
     finally:
         # 主进程退出时关闭 websockify 子进程
         if _websockify is not None:

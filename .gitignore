@@ -1,17 +1,3 @@
-# Local Python environments and bytecode
-/.venv/
-/venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-
-# Runtime output (keep locally, do not commit)
-/logs/
-/llm_output/
-/screenshots/
-/summary/
-/screenshot.png
-/guest_url_test.png
-
-# Local editor state
-/.trae/
+"logs/" 
+"llm_output/" 
+".trae/"
